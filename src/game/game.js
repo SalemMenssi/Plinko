@@ -35,9 +35,14 @@ const THEME = {
     fontWeight: 100,
     fontSizeScale: 0.4,
     shadowAlpha: 0.45,
+    borderWidth: 2,
     strokeAlpha: 0.25,
     highlightAlpha: 0.22,
     pressDepth: 5,
+    innerInsetScale: 0,
+    innerAlpha: 0,
+    entryInsetScale: 0.22,
+    entryBottomScale: 0.92,
   },
   multiplierColors: {
     max: 0xd32f2f,
@@ -48,28 +53,53 @@ const THEME = {
     low: 0xffd54f,
   },
   textDark: 0x0a1628,
+  layout: {
+    leftPadding: 0,
+    rightPadding: 0,
+    historyGap: 5,
+    boardOffsetX: 5,
+    boardOffsetY: 0,
+    gridStartYScale: 0.055,
+    gridStartYOffset: 0,
+    baseWidthScale: 1.2,
+    pegOffsetX: 0,
+    pegOffsetXMinRows: 8,
+    pegOffsetXMaxRows: 16,
+    pegOffsetXAtMinRows: -35,
+    pegOffsetXAtMaxRows: -20,
+    boxOffsetX: 0,
+    boxOffsetY: 0,
+    historyOffsetX: 0,
+    historyOffsetY: 0,
+    spawnOffsetX: 0,
+    spawnOffsetY: 0,
+    spawnCompensatePegOffset: true,
+    spawnClampPadding: 0,
+  },
   pegPattern: {
     startRow: 1,
   },
 };
 
 const PHYS = {
-  gravity: 1000,
-  drag: 0.996,
-  maxSpeed: 1000,
-  restitution: 0.42,
-  wallRestitution: 0.2,
-  tangentialDamp: 0.9,
+  gravity: 1100,
+  drag: 0.993,
+  maxSpeed: 170,
+  restitution: 0.36,
+  wallRestitution: 0.14,
+  tangentialDamp: 0.85,
   collisionSlop: 0.01,
-  impulseJitter: 14,
+  impulseJitter: 8,
   aimStrength: 0.00105,
+  centerBiasStrength: 0.02,
+  centerBiasJitter: 0.2,
 };
 
 const BASE_MULTIPLIERS = [
   110, 41, 10, 5, 3, 1.5, 1, 0.5, 0.3, 0.5, 1, 1.5, 3, 5, 10, 41, 110,
 ];
 
-const MULTIPLIER_TABLE = {
+const MULTIPLIER_TABLE_MEDIUM = {
   16: [
     { value: 110, color: 0xff003f }, // red
     { value: 41, color: 0xff1837 }, // red
@@ -208,15 +238,56 @@ const MULTIPLIER_TABLE = {
   ],
 };
 
-function getMultiplierColor(value, rows) {
-  const multiplierData = MULTIPLIER_TABLE[rows] || [];
+const DIFFICULTY_SCALES = {
+  low: 0.75,
+  medium: 1,
+  high: 1.35,
+};
+
+const DEFAULT_DIFFICULTY = "medium";
+
+function normalizeDifficulty(value) {
+  return DIFFICULTY_SCALES[value] ? value : DEFAULT_DIFFICULTY;
+}
+
+function formatMultiplierValue(value) {
+  if (!Number.isFinite(value)) return 0;
+  if (value >= 10) return Math.round(value);
+  if (value >= 1) return Math.round(value * 10) / 10;
+  return Math.round(value * 100) / 100;
+}
+
+function buildDifficultyTable(scale) {
+  const table = {};
+  Object.keys(MULTIPLIER_TABLE_MEDIUM).forEach((rowKey) => {
+    const entries = MULTIPLIER_TABLE_MEDIUM[rowKey];
+    table[rowKey] = entries.map((entry) => ({
+      value: formatMultiplierValue(entry.value * scale),
+      color: entry.color,
+    }));
+  });
+  return table;
+}
+
+const MULTIPLIER_TABLES = {
+  low: buildDifficultyTable(DIFFICULTY_SCALES.low),
+  medium: MULTIPLIER_TABLE_MEDIUM,
+  high: buildDifficultyTable(DIFFICULTY_SCALES.high),
+};
+
+function getMultiplierTable(difficulty) {
+  return MULTIPLIER_TABLES[normalizeDifficulty(difficulty)];
+}
+
+function getMultiplierColor(value, rows, difficulty) {
+  const multiplierData = getMultiplierTable(difficulty)?.[rows] || [];
   const multiplier = multiplierData.find((m) => m.value === value);
 
   return multiplier ? multiplier.color : 0xffffff; // Default white if not found
 }
 
-function createMultipliers(rows) {
-  const multipliers = MULTIPLIER_TABLE[rows] || [];
+function createMultipliers(rows, difficulty) {
+  const multipliers = getMultiplierTable(difficulty)?.[rows] || [];
 
   // Create the boxes and assign colors dynamically
   multipliers.forEach((multiplier, i) => {
@@ -244,10 +315,10 @@ function createMultipliers(rows) {
   });
 }
 
-function updateMultiplierUI(rows) {
+function updateMultiplierUI(rows, difficulty) {
   uiContainer.removeChildren();
 
-  createMultipliers(rows);
+  createMultipliers(rows, difficulty);
 }
 
 function getMultiplierTextColor() {
@@ -317,26 +388,59 @@ function selectByProbability(probabilities) {
   return normalized.length - 1;
 }
 
-function getPegPosition(row, col, gridWidth, startY, pegSpacingX, pegSpacingY) {
+function getPegOffsetXForRows(rows) {
+  const layout = THEME.layout || {};
+  const baseOffset = Number.isFinite(layout.pegOffsetX)
+    ? layout.pegOffsetX
+    : 0;
+  const minRows = Number(layout.pegOffsetXMinRows);
+  const maxRows = Number(layout.pegOffsetXMaxRows);
+  const minOffset = Number(layout.pegOffsetXAtMinRows);
+  const maxOffset = Number(layout.pegOffsetXAtMaxRows);
+
+  const hasRange =
+    Number.isFinite(minRows) &&
+    Number.isFinite(maxRows) &&
+    Number.isFinite(minOffset) &&
+    Number.isFinite(maxOffset) &&
+    minRows !== maxRows;
+  if (!hasRange) {
+    return baseOffset;
+  }
+
+  const t = (rows - minRows) / (maxRows - minRows);
+  const clamped = Math.max(0, Math.min(1, t));
+  return baseOffset + minOffset + (maxOffset - minOffset) * clamped;
+}
+
+function getPegPosition(
+  row,
+  col,
+  gridWidth,
+  startY,
+  pegSpacingX,
+  pegSpacingY,
+  pegOffsetX
+) {
+  const offsetX = Number.isFinite(pegOffsetX) ? pegOffsetX : 0;
   const pegsInRow = row + 1;
   const rowWidth = (pegsInRow - 1) * pegSpacingX;
   const startX = (gridWidth - rowWidth) / 2;
   return {
-    x: startX + col * pegSpacingX,
+    x: startX + col * pegSpacingX + offsetX,
     y: startY + row * pegSpacingY,
   };
 }
 
-function getMultipliersForRows(rows) {
-  const multipliers = MULTIPLIER_TABLE[rows];
+function getMultipliersForRows(rows, difficulty) {
+  const multipliers = getMultiplierTable(difficulty)?.[rows];
 
   if (!multipliers) {
     console.warn(`No multiplier data available for ${rows} rows.`);
     return [];
   }
 
-  console.log(`Multipliers for ${rows} rows:`, multipliers);
-  return multipliers;
+  return multipliers.map((entry) => ({ ...entry }));
 }
 
 export async function createGame(mount, opts = {}) {
@@ -350,15 +454,27 @@ export async function createGame(mount, opts = {}) {
   let rows = opts.rows ?? 16;
   rows = Math.max(minRows, Math.min(maxRows, rows));
 
+  let difficulty = normalizeDifficulty(opts.difficulty);
   const historySize = opts.historySize ?? 10;
 
-  let multipliers = MULTIPLIER_TABLE[rows] || [];
+  let multipliers = getMultipliersForRows(rows, difficulty);
   let boxCount = multipliers.length;
 
   let probabilities = generateBinomialProbabilities(rows);
 
   let isAnimating = false;
+  let activeDrops = 0;
   let history = [];
+
+  const markDropStart = () => {
+    activeDrops += 1;
+    isAnimating = activeDrops > 0;
+  };
+
+  const markDropEnd = () => {
+    activeDrops = Math.max(0, activeDrops - 1);
+    isAnimating = activeDrops > 0;
+  };
 
   const app = new Application();
 
@@ -396,7 +512,7 @@ export async function createGame(mount, opts = {}) {
   let boxGraphics = [];
   let boxTexts = [];
   let historyBoxes = [];
-  let ball = null;
+  let historyTweens = [];
 
   let gameWidth = 0;
   let gameHeight = 0;
@@ -418,6 +534,7 @@ export async function createGame(mount, opts = {}) {
   let baseLeft = 0;
   let baseRight = 0;
   let apexX = 0;
+  let pegOffsetX = 0;
 
   let scoreZoneTop = 0;
   let scoreZoneBottom = 0;
@@ -430,15 +547,26 @@ export async function createGame(mount, opts = {}) {
     const containerWidth = Math.max(1, root.clientWidth || 500);
     const containerHeight = Math.max(1, root.clientHeight || 500);
 
+    const layout = THEME.layout || {};
+    const leftPadding = layout.leftPadding ?? 0;
+    const rightPadding = layout.rightPadding ?? 0;
+    const historyGap = layout.historyGap ?? 5;
+    pegOffsetX = getPegOffsetXForRows(rows);
+
     historyPanelWidth = Math.min(110, containerWidth * 0.16);
-    const playAreaWidth = containerWidth - historyPanelWidth - 30;
+    const playAreaWidth = Math.max(
+      1,
+      containerWidth - historyPanelWidth - historyGap - leftPadding - rightPadding
+    );
 
     gameWidth = playAreaWidth;
     gameHeight = containerHeight;
 
     const maxPegsInRow = rows + 1;
 
-    gridStartY = gameHeight * 0.055;
+    gridStartY =
+      gameHeight * (layout.gridStartYScale ?? 0.055) +
+      (layout.gridStartYOffset ?? 0);
     gridWidth = gameWidth;
 
     const bottomReserve = gameHeight * 0.14;
@@ -450,16 +578,19 @@ export async function createGame(mount, opts = {}) {
     pegRadius = Math.min(pegSpacingX, pegSpacingY) * THEME.pegRadiusScale;
     ballRadius = pegRadius * THEME.ballRadiusScale;
 
-    historyPanelX = gridWidth + 15;
-    historyPanelY = gridStartY;
+    historyPanelX = gridWidth + historyGap + (layout.historyOffsetX ?? 0);
+    historyPanelY = gridStartY + (layout.historyOffsetY ?? 0);
 
     lastRowY = gridStartY + rows * pegSpacingY;
-    baseWidth = rows * pegSpacingX * 1.2;
+    baseWidth = rows * pegSpacingX * (layout.baseWidthScale ?? 1.2);
     baseLeft = (gridWidth - baseWidth) / 2;
     baseRight = baseLeft + baseWidth;
     apexX = gridWidth / 2;
 
-    mainContainer.position.set(0, 0);
+    mainContainer.position.set(
+      leftPadding + (layout.boardOffsetX ?? 0),
+      layout.boardOffsetY ?? 0
+    );
   }
 
   function triangleBoundsAtY(y) {
@@ -467,8 +598,8 @@ export async function createGame(mount, opts = {}) {
     const y1 = lastRowY;
     const t = y1 === y0 ? 1 : Math.max(0, Math.min(1, (y - y0) / (y1 - y0)));
     const w = baseWidth * t;
-    const left = apexX - w / 2;
-    const right = apexX + w / 2;
+    const left = apexX + pegOffsetX - w / 2;
+    const right = apexX + pegOffsetX + w / 2;
     return { left, right };
   }
 
@@ -533,7 +664,8 @@ export async function createGame(mount, opts = {}) {
           gridWidth,
           gridStartY,
           pegSpacingX,
-          pegSpacingY
+          pegSpacingY,
+          pegOffsetX
         );
 
         const peg = new Graphics();
@@ -570,11 +702,27 @@ export async function createGame(mount, opts = {}) {
     g.drawRoundedRect(0, 0, w, h, r);
     g.endFill();
 
+    const insetScale = THEME.multiplierBox.innerInsetScale ?? 0;
+    const innerAlpha = THEME.multiplierBox.innerAlpha ?? 0;
+    if (insetScale > 0 && innerAlpha > 0) {
+      const inset = Math.max(2, Math.floor(Math.min(w, h) * insetScale));
+      const innerW = Math.max(1, w - inset * 2);
+      const innerH = Math.max(1, h - inset * 1.5);
+      const innerR = Math.max(2, r - inset * 0.6);
+      g.beginFill(0x000000, innerAlpha);
+      g.drawRoundedRect(inset, inset * 0.7, innerW, innerH, innerR);
+      g.endFill();
+    }
+
     g.beginFill(0xffffff, THEME.multiplierBox.highlightAlpha);
     g.drawRoundedRect(0, 0, w, h * 0.42, Math.max(8, r - 2));
     g.endFill();
 
-    g.lineStyle(2, 0x000000, THEME.multiplierBox.strokeAlpha);
+    g.lineStyle(
+      THEME.multiplierBox.borderWidth ?? 2,
+      0x000000,
+      THEME.multiplierBox.strokeAlpha
+    );
     g.drawRoundedRect(0, 0, w, h, r);
   }
 
@@ -586,6 +734,7 @@ export async function createGame(mount, opts = {}) {
 
     const gap = THEME.multiplierBox.gap;
     const maxBoxesWidth = baseWidth * 0.9;
+    const layout = THEME.layout || {};
 
     // Dynamically calculate the width for the boxes based on available space
     const wFit = (maxBoxesWidth - boxCount * gap) / boxCount;
@@ -604,21 +753,20 @@ export async function createGame(mount, opts = {}) {
     // Create a container for the boxes
     const boxesContainer = new Container();
 
-    // Apply a red border to the container
-    const border = new Graphics();
-    border.lineStyle(2, 0xff0000); // Red border color
-    border.drawRect(0, 0, totalW, h + gap); // Adjust height and width of border
-    boxesContainer.addChild(border);
-
     // Centering the boxes by calculating startX
-    const startX = baseLeft + 17.5 + (1 - (boxCount-1)/16)*30 + (baseWidth - totalW) / 2;
+    const startX =
+      baseLeft + (baseWidth - totalW) / 2 + (layout.boxOffsetX ?? 0);
     // Adjust the Y position for the boxes based on available space
-    const boxY = Math.min(gameHeight - h - 12, lastRowY + pegSpacingY * 0.65);
+    const boxY =
+      Math.min(gameHeight - h - 12, lastRowY + pegSpacingY * 0.65) +
+      (layout.boxOffsetY ?? 0);
 
     // Create boxes for the multipliers
     for (let i = 0; i < boxCount; i++) {
       const multiplier = multipliers[i];
-      const color = getMultiplierColor(multiplier.value, rows);
+      const color =
+        multiplier?.color ??
+        getMultiplierColor(multiplier?.value, rows, difficulty);
       const textColor = getMultiplierTextColor(multiplier);
 
       // Position each box based on calculated startX and index
@@ -675,142 +823,21 @@ export async function createGame(mount, opts = {}) {
     uiContainer.addChild(boxesContainer);
   }
 
-  async function simulateDrop(targetIndex) {
-    return new Promise((resolve) => {
-      if (ball) ball.destroy();
-      ball = createBall();
-      ball.alpha = 1;
-      ball.scale.set(1);
-      ballContainer.addChild(ball);
-
-      const startRow = THEME.pegPattern.startRow ?? 0;
-      const startPos = getPegPosition(
-        startRow,
-        0,
-        gridWidth,
-        gridStartY,
-        pegSpacingX,
-        pegSpacingY
-      );
-
-      const targetX = boxGraphics[targetIndex]?.x + boxWidth / 2 || apexX;
-
-      const state = {
-        x: apexX,
-        y: startPos.y - pegSpacingY * 0.9,
-        vx: (Math.random() - 0.5) * 120,
-        vy: 0,
-      };
-
-      const settleLineY =
-        boxGraphics[0]?.y - ballRadius * 0.35 || lastRowY + pegSpacingY;
-      let settledFrames = 0;
-      let landedIndex = 0;
-      let done = false;
-
-      const step = (ticker) => {
-        if (done) return;
-
-        const dt = Math.min(1 / 30, ticker.deltaMS / 1000);
-
-        const axAim = (targetX - state.x) * PHYS.aimStrength;
-        state.vx += axAim * (PHYS.gravity * 0.18) * dt;
-
-        state.vy += PHYS.gravity * dt;
-
-        state.vx *= Math.pow(PHYS.drag, dt * 60);
-        state.vy *= Math.pow(PHYS.drag, dt * 60);
-
-        const sp = Math.hypot(state.vx, state.vy);
-        if (sp > PHYS.maxSpeed) {
-          const k = PHYS.maxSpeed / sp;
-          state.vx *= k;
-          state.vy *= k;
-        }
-
-        state.x += state.vx * dt;
-        state.y += state.vy * dt;
-
-        const b = triangleBoundsAtY(state.y);
-        const left = b.left + ballRadius;
-        const right = b.right - ballRadius;
-
-        if (state.x < left) {
-          state.x = left;
-          if (state.vx < 0) state.vx = -state.vx * PHYS.wallRestitution;
-        } else if (state.x > right) {
-          state.x = right;
-          if (state.vx > 0) state.vx = -state.vx * PHYS.wallRestitution;
-        }
-
-        let hit = false;
-        for (let i = 0; i < pegPoints.length; i++) {
-          if (resolvePegCollision(state, pegPoints[i].x, pegPoints[i].y))
-            hit = true;
-        }
-
-        const squash = 1 + Math.min(0.18, Math.abs(state.vy) / 2400) * 0.12;
-        ball.scale.set(1 / squash, squash);
-
-        ball.x = state.x;
-        ball.y = state.y;
-
-        if (hit && THEME.pinBounce.enabled) {
-          const baseY = ball.y;
-          const down = pegRadius * THEME.pinBounce.downOffsetScale;
-          tween(app, {
-            duration: THEME.pinBounce.duration,
-            update: (t) => {
-              const e = easeOutQuad(t);
-              const phase = Math.sin(e * Math.PI);
-              ball.y = baseY + phase * down;
-            },
-            complete: () => {
-              ball.y = baseY;
-            },
-          });
-        }
-
-        if (state.y >= settleLineY) {
-          landedIndex = getClosestBoxIndexByX(state.x);
-          if (Math.abs(state.vy) < PHYS.settleVy) settledFrames++;
-          else settledFrames = 0;
-
-          if (settledFrames >= PHYS.settleMaxFrames) {
-            done = true;
-            app.ticker.remove(step);
-            highlightBox(landedIndex);
-            animateFadeOutBall(() => {
-              // Ensure the ball is destroyed and the history is updated with the correct multiplier
-              history.unshift(multipliers[landedIndex]);
-              if (history.length > historySize) history.length = historySize;
-              updateHistoryDisplay();
-              resolve(landedIndex);
-            });
-          }
-        }
-      };
-
-      app.ticker.add(step);
-    });
-  }
-
-  function destroyBallAndResolve(resolve, value) {
-    if (!ball) {
+  function destroyBallAndResolve(resolve, value, ballToDestroy) {
+    if (!ballToDestroy) {
       resolve(value);
       return;
     }
     tween(app, {
       duration: 220,
       update: (t) => {
-        if (!ball) return;
-        ball.alpha = 1 - t;
-        ball.scale.set(1 - t * 0.35);
+        if (!ballToDestroy || ballToDestroy.destroyed) return;
+        ballToDestroy.alpha = 1 - t;
+        ballToDestroy.scale.set(1 - t * 0.35);
       },
       complete: () => {
-        if (ball) {
-          ball.destroy();
-          ball = null;
+        if (ballToDestroy && !ballToDestroy.destroyed) {
+          ballToDestroy.destroy();
         }
         resolve(value);
       },
@@ -833,32 +860,30 @@ export async function createGame(mount, opts = {}) {
   }
 
   function updateHistoryDisplay() {
+    historyTweens.forEach((cancel) => cancel());
+    historyTweens = [];
     historyBoxes.forEach((b) => b.destroy());
     historyBoxes = [];
 
-    const boxSize = Math.min(historyPanelWidth - 10, 60);
-    const gap = 8;
     const startY = historyPanelY + 20;
+    const availableHeight = Math.max(1, gameHeight - startY - 10);
+    const entryHeight = availableHeight / Math.max(1, historySize);
+    const maxBoxSize = Math.max(6, Math.min(historyPanelWidth - 10, 60));
+    const boxHeight = Math.min(entryHeight * 0.9, maxBoxSize * 0.62);
+    const boxSize = Math.max(6, Math.min(maxBoxSize, boxHeight / 0.62));
+    const gap = Math.max(2, Math.min(8, entryHeight - boxSize * 0.62));
 
     history.slice(0, historySize).forEach((multiplier, index) => {
+      if (multiplier == null) return;
       // if (typeof multiplier !== "number") {
       //   console.warn(`History multiplier is not a number:`, multiplier);
       //   multiplier = 0; // Default to 0 if it's not a valid number
       // }
 
-      const rowData = MULTIPLIER_TABLE[rows]; // Get the multiplier data for the selected rows
-
-      // Find the corresponding multiplier data from MULTIPLIER_TABLE
-      const multiplierData = rowData?.find((m) => m.value == multiplier.value);
-      console.log(rowData);
-      // Log the data to debug
-      console.log(
-        `Looking for multiplier ${multiplier.value} in MULTIPLIER_TABLE[${rows}]`,
-        multiplierData
-      );
-
-      const color = multiplierData ? multiplierData.color : 0xffffff; // Default to white if not found
-      const textColor = getMultiplierTextColor(multiplier.value);
+      const value = Number(multiplier?.value ?? multiplier);
+      const hasValue = Number.isFinite(value);
+      const color = multiplier?.color ?? 0xffffff; // Default to white if not found
+      const textColor = getMultiplierTextColor(value);
 
       const wrap = new Container();
 
@@ -872,12 +897,7 @@ export async function createGame(mount, opts = {}) {
         fill: textColor,
       });
 
-      const label =
-        multiplierData && multiplierData.value % 1 === 0
-          ? `${multiplierData.value}x`
-          : multiplierData
-          ? `${multiplierData.value}x`
-          : "N/A";
+      const label = hasValue ? `${value}x` : "N/A";
 
       const text = new Text(label, style);
       text.anchor.set(0.5);
@@ -897,14 +917,16 @@ export async function createGame(mount, opts = {}) {
         wrap.x += boxSize / 2;
         wrap.y += (boxSize * 0.62) / 2;
 
-        tween(app, {
+        const cancel = tween(app, {
           duration: 400,
           update: (t) => {
+            if (wrap.destroyed) return;
             const eased = easeOutBack(t);
             wrap.scale.set(eased);
             wrap.alpha = t;
           },
         });
+        historyTweens.push(cancel);
       }
 
       historyContainer.addChild(wrap);
@@ -931,7 +953,7 @@ export async function createGame(mount, opts = {}) {
   }
 
   function getClosestBoxIndexByX(x) {
-    if (!boxGraphics.length) return 0;
+    if (!boxGraphics.length) return -1;
     let best = 0;
     let bestD = Infinity;
     for (let i = 0; i < boxGraphics.length; i++) {
@@ -948,37 +970,39 @@ export async function createGame(mount, opts = {}) {
   function highlightBox(boxIndex) {
     const box = boxGraphics[boxIndex];
     const text = boxTexts[boxIndex];
+    if (!box || !text || box.destroyed || text.destroyed) return;
 
     tween(app, {
       duration: 160,
       update: (t) => {
+        if (box.destroyed || text.destroyed) return;
         const s = 1 + Math.sin(t * Math.PI) * 0.22;
         box.scale.set(s);
         text.scale.set(s);
       },
       complete: () => {
+        if (box.destroyed || text.destroyed) return;
         box.scale.set(1);
         text.scale.set(1);
       },
     });
   }
 
-  function destroyBallAndResolve(resolve, value) {
-    if (!ball) {
+  function destroyBallAndResolve(resolve, value, ballToDestroy) {
+    if (!ballToDestroy) {
       resolve(value);
       return;
     }
     tween(app, {
       duration: 220,
       update: (t) => {
-        if (!ball) return;
-        ball.alpha = 1 - t;
-        ball.scale.set(1 - t * 0.35);
+        if (!ballToDestroy) return;
+        ballToDestroy.alpha = 1 - t;
+        ballToDestroy.scale.set(1 - t * 0.35);
       },
       complete: () => {
-        if (ball) {
-          ball.destroy();
-          ball = null;
+        if (ballToDestroy) {
+          ballToDestroy.destroy();
         }
         resolve(value);
       },
@@ -1019,6 +1043,24 @@ export async function createGame(mount, opts = {}) {
         ny * (state.vx * nx + state.vy * ny);
 
       state.vx += (Math.random() - 0.5) * PHYS.impulseJitter;
+
+      const centerBiasStrength = PHYS.centerBiasStrength ?? 0;
+      if (centerBiasStrength > 0 && Math.abs(state.vx) > 1e-4) {
+        const toCenter = apexX + pegOffsetX - state.x;
+        const directionToCenter = Math.sign(toCenter);
+        if (directionToCenter !== 0) {
+          const maxDistance = Math.max(1, gridWidth * 0.5);
+          const distanceFactor = Math.min(1, Math.abs(toCenter) / maxDistance);
+          if (distanceFactor > 0) {
+            const jitter =
+              1 + (Math.random() - 0.5) * (PHYS.centerBiasJitter ?? 0);
+            const bias = centerBiasStrength * distanceFactor * jitter;
+            const movingTowardCenter =
+              Math.sign(state.vx) === directionToCenter;
+            state.vx *= movingTowardCenter ? 1 + bias : 1 - bias;
+          }
+        }
+      }
       spawnRipple(pegX, pegY - pegRadius * 0.2);
       return true;
     }
@@ -1027,11 +1069,10 @@ export async function createGame(mount, opts = {}) {
 
   async function simulateDrop(targetIndex) {
     return new Promise((resolve) => {
-      if (ball) ball.destroy();
-      ball = createBall();
-      ball.alpha = 1;
-      ball.scale.set(1);
-      ballContainer.addChild(ball);
+      const activeBall = createBall();
+      activeBall.alpha = 1;
+      activeBall.scale.set(1);
+      ballContainer.addChild(activeBall);
 
       const startRow = THEME.pegPattern.startRow ?? 0;
       const startPos = getPegPosition(
@@ -1040,17 +1081,68 @@ export async function createGame(mount, opts = {}) {
         gridWidth,
         gridStartY,
         pegSpacingX,
-        pegSpacingY
+        pegSpacingY,
+        pegOffsetX
       );
 
-      const targetX = boxGraphics[targetIndex]?.x + boxWidth / 2 || apexX;
+      const layout = THEME.layout || {};
+      const spawnCompensate = layout.spawnCompensatePegOffset ?? true;
+      const boxCenterBounds = (() => {
+        if (boxGraphics.length && boxWidth > 0) {
+          const first = boxGraphics[0];
+          const last = boxGraphics[boxGraphics.length - 1];
+          if (first && last) {
+            const left = first.x + boxWidth / 2;
+            const right = last.x + boxWidth / 2;
+            if (right > left) {
+              return { left, right, center: (left + right) / 2, has: true };
+            }
+          }
+        }
+        return {
+          left: ballRadius,
+          right: gridWidth - ballRadius,
+          center: apexX,
+          has: false,
+        };
+      })();
+
+      const spawnOffsetX =
+        (Number.isFinite(layout.spawnOffsetX) ? layout.spawnOffsetX : 0) +
+        (!boxCenterBounds.has && spawnCompensate ? -pegOffsetX : 0);
+      const spawnOffsetY = Number.isFinite(layout.spawnOffsetY)
+        ? layout.spawnOffsetY
+        : 0;
+      const spawnCenterX = boxCenterBounds.center + spawnOffsetX;
+
+      const baseJitter = Math.min(pegSpacingX * 0.35, boxWidth * 0.3);
+      const spawnJitter = Math.max(4, Math.min(24, baseJitter));
+      const spawnClampPadding = Number.isFinite(layout.spawnClampPadding)
+        ? layout.spawnClampPadding
+        : 0;
+      const clampPad = Math.max(0, spawnClampPadding);
+      const halfBoxWidth = boxWidth > 0 ? boxWidth / 2 : 0;
+      const boundsLeft = boxCenterBounds.left - halfBoxWidth;
+      const boundsRight = boxCenterBounds.right + halfBoxWidth;
+      const spawnLeft = boundsLeft - clampPad;
+      const spawnRight = boundsRight + clampPad;
+      const playBounds = { left: spawnLeft, right: spawnRight };
+      const spawnX = Math.max(
+        spawnLeft,
+        Math.min(
+          spawnRight,
+          spawnCenterX + (Math.random() - 0.5) * spawnJitter * 2
+        )
+      );
 
       const state = {
-        x: apexX,
-        y: startPos.y - pegSpacingY * 0.9,
+        x: spawnX,
+        y: startPos.y - pegSpacingY * 0.9 + spawnOffsetY,
         vx: (Math.random() - 0.5) * 120,
         vy: 0,
       };
+      activeBall.x = state.x;
+      activeBall.y = state.y;
 
       let done = false;
 
@@ -1058,9 +1150,6 @@ export async function createGame(mount, opts = {}) {
         if (done) return;
 
         const dt = Math.min(1 / 30, ticker.deltaMS / 1000);
-
-        const axAim = (targetX - state.x) * PHYS.aimStrength;
-        state.vx += axAim * (PHYS.gravity * 0.18) * dt;
 
         state.vy += PHYS.gravity * dt;
 
@@ -1077,7 +1166,7 @@ export async function createGame(mount, opts = {}) {
         state.x += state.vx * dt;
         state.y += state.vy * dt;
 
-        const b = triangleBoundsAtY(state.y);
+        const b = playBounds;
         const left = b.left + ballRadius;
         const right = b.right - ballRadius;
 
@@ -1095,48 +1184,61 @@ export async function createGame(mount, opts = {}) {
             hit = true;
         }
 
-        if (ball) {
-          const squash = 1 + Math.min(0.18, Math.abs(state.vy) / 2400) * 0.12;
-          ball.scale.set(1 / squash, squash);
-          ball.x = state.x;
-          ball.y = state.y;
-        }
+        const squash = 1 + Math.min(0.18, Math.abs(state.vy) / 2400) * 0.12;
+        activeBall.scale.set(1 / squash, squash);
+        activeBall.x = state.x;
+        activeBall.y = state.y;
 
-        if (hit && THEME.pinBounce.enabled && ball) {
-          const baseY = ball.y;
+        if (hit && THEME.pinBounce.enabled) {
+          const baseY = activeBall.y;
           const down = pegRadius * THEME.pinBounce.downOffsetScale;
           tween(app, {
             duration: THEME.pinBounce.duration,
             update: (t) => {
+              if (activeBall.destroyed) return;
               const e = easeOutQuad(t);
               const phase = Math.sin(e * Math.PI);
-              if (ball) ball.y = baseY + phase * down;
+              activeBall.y = baseY + phase * down;
             },
             complete: () => {
-              if (ball) ball.y = baseY;
+              if (activeBall.destroyed) return;
+              activeBall.y = baseY;
             },
           });
         }
 
-        const zTop =
-          scoreZoneTop ||
-          (boxGraphics[0]?.y ?? lastRowY + pegSpacingY) + boxHeight;
-        const zBottom =
-          scoreZoneBottom || zTop + Math.max(10, boxHeight * 0.95);
+        const boxTop = boxGraphics[0]?.y ?? lastRowY + pegSpacingY;
+        const entryInset = Math.min(
+          boxHeight * 0.45,
+          Math.max(
+            ballRadius * 0.6,
+            boxHeight * (THEME.multiplierBox.entryInsetScale ?? 0.22)
+          )
+        );
+        const entryBottom = Math.max(
+          entryInset + ballRadius,
+          boxHeight * (THEME.multiplierBox.entryBottomScale ?? 0.92)
+        );
+        const zTop = scoreZoneTop || boxTop + entryInset;
+        const zBottom = scoreZoneBottom || boxTop + entryBottom;
 
         if (state.y >= zTop && state.y <= zBottom) {
           const landedIndex = getClosestBoxIndexByX(state.x);
           done = true;
           app.ticker.remove(step);
-          highlightBox(landedIndex);
-          destroyBallAndResolve(resolve, landedIndex);
+          if (landedIndex >= 0) {
+            highlightBox(landedIndex);
+            destroyBallAndResolve(resolve, landedIndex, activeBall);
+          } else {
+            destroyBallAndResolve(resolve, -1, activeBall);
+          }
           return;
         }
 
         if (state.y > gameHeight + ballRadius * 3) {
           done = true;
           app.ticker.remove(step);
-          destroyBallAndResolve(resolve, -1);
+          destroyBallAndResolve(resolve, -1, activeBall);
         }
       };
 
@@ -1167,6 +1269,73 @@ export async function createGame(mount, opts = {}) {
     updateHistoryDisplay();
   }
 
+  function getRtpEstimate() {
+    if (!Array.isArray(probabilities) || !Array.isArray(multipliers)) {
+      return null;
+    }
+    const count = Math.min(probabilities.length, multipliers.length);
+    if (count <= 0) {
+      return null;
+    }
+
+    let weightedSum = 0;
+    let totalProbability = 0;
+
+    for (let i = 0; i < count; i++) {
+      const probability = Number(probabilities[i]);
+      const multiplier = Number(multipliers[i]?.value ?? multipliers[i]);
+      if (!Number.isFinite(probability) || probability < 0) {
+        continue;
+      }
+      if (!Number.isFinite(multiplier)) {
+        continue;
+      }
+      weightedSum += probability * multiplier;
+      totalProbability += probability;
+    }
+
+    if (totalProbability <= 0) {
+      return null;
+    }
+
+    return weightedSum / totalProbability;
+  }
+
+  function getWinChance(minMultiplier = 1) {
+    if (!Array.isArray(probabilities) || !Array.isArray(multipliers)) {
+      return null;
+    }
+    const count = Math.min(probabilities.length, multipliers.length);
+    if (count <= 0) {
+      return null;
+    }
+
+    const threshold = Number(minMultiplier);
+    let totalProbability = 0;
+    let winProbability = 0;
+
+    for (let i = 0; i < count; i++) {
+      const probability = Number(probabilities[i]);
+      const multiplier = Number(multipliers[i]?.value ?? multipliers[i]);
+      if (!Number.isFinite(probability) || probability < 0) {
+        continue;
+      }
+      if (!Number.isFinite(multiplier)) {
+        continue;
+      }
+      totalProbability += probability;
+      if (multiplier >= threshold) {
+        winProbability += probability;
+      }
+    }
+
+    if (totalProbability <= 0) {
+      return null;
+    }
+
+    return winProbability / totalProbability;
+  }
+
   calculateLayout();
   resize();
 
@@ -1176,34 +1345,35 @@ export async function createGame(mount, opts = {}) {
 
   return {
     async startRound() {
-      if (isAnimating) return -1;
-      isAnimating = true;
+      markDropStart();
 
-      const fullBoxCount = rows + 1;
+      try {
+        const fullBoxCount = rows + 1;
 
-      let probs = probabilities;
-      if (!Array.isArray(probs) || probs.length !== fullBoxCount) {
-        probs = generateBinomialProbabilities(rows);
+        let probs = probabilities;
+        if (!Array.isArray(probs) || probs.length !== fullBoxCount) {
+          probs = generateBinomialProbabilities(rows);
+        }
+
+        const targetIndex = Math.max(
+          0,
+          Math.min(selectByProbability(probs), boxCount - 1)
+        );
+
+        const landedIndex = await simulateDrop(targetIndex);
+
+        if (landedIndex >= 0) {
+          const multiplier = multipliers[landedIndex];
+          history.unshift(multiplier);
+          if (history.length > historySize) history.length = historySize;
+          updateHistoryDisplay();
+          return multiplier;
+        }
+
+        return -1;
+      } finally {
+        markDropEnd();
       }
-
-      const targetIndex = Math.max(
-        0,
-        Math.min(selectByProbability(probs), boxCount - 1)
-      );
-
-      const landedIndex = await simulateDrop(targetIndex);
-
-      if (landedIndex >= 0) {
-        const multiplier = multipliers[landedIndex];
-        history.unshift(multiplier);
-        if (history.length > historySize) history.length = historySize;
-        updateHistoryDisplay();
-        isAnimating = false;
-        return multiplier;
-      }
-
-      isAnimating = false;
-      return -1;
     },
 
     destroy() {
@@ -1218,6 +1388,7 @@ export async function createGame(mount, opts = {}) {
         isAnimating,
         history: [...history],
         rows,
+        difficulty,
         boxCount,
         multipliers: multipliers.slice(),
       };
@@ -1228,6 +1399,25 @@ export async function createGame(mount, opts = {}) {
       probabilities = [...weights];
     },
 
+    getRtpEstimate() {
+      return getRtpEstimate();
+    },
+
+    getWinChance({ minMultiplier = 1 } = {}) {
+      return getWinChance(minMultiplier);
+    },
+
+    setDifficulty(newDifficulty) {
+      if (isAnimating) return;
+      const normalized = normalizeDifficulty(newDifficulty);
+      if (normalized === difficulty) return;
+      difficulty = normalized;
+      multipliers = getMultipliersForRows(rows, difficulty);
+      boxCount = multipliers.length;
+      createBoxes();
+      updateHistoryDisplay();
+    },
+
     setRows(newRows) {
       if (isAnimating) return;
 
@@ -1236,7 +1426,7 @@ export async function createGame(mount, opts = {}) {
       if (clamped === rows) return;
 
       rows = clamped;
-      multipliers = getMultipliersForRows(rows);
+      multipliers = getMultipliersForRows(rows, difficulty);
       boxCount = multipliers.length;
       probabilities = generateBinomialProbabilities(rows);
 

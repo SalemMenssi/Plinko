@@ -77,6 +77,7 @@ let sessionExpirationRecoveryTask = null;
 
 // NEW: store pending rows change if control panel fires before game is ready
 let pendingRows = null;
+let pendingDifficulty = null;
 
 const diamondScaleFactor = 1;
 const bombScaleFactor = 1.3;
@@ -2113,6 +2114,15 @@ const opts = {
       }
     });
 
+    controlPanel.addEventListener("difficultychange", (event) => {
+      const difficulty = event.detail?.difficulty ?? event.detail?.value;
+      if (!difficulty) return;
+      pendingDifficulty = difficulty;
+      if (game?.setDifficulty) {
+        game.setDifficulty(difficulty);
+      }
+    });
+
     // Old Mines stuff (harmless for Plinko – events likely never fire)
     controlPanel.addEventListener("mineschanged", (event) => {
       const shouldSyncGame =
@@ -2188,7 +2198,14 @@ const opts = {
 
   // Initialize Game (Plinko)
   try {
-    game = await createGame("#game", { ...opts, rows: 16, historySize: 10 });
+    const initialDifficulty =
+      pendingDifficulty ?? controlPanel?.getDifficultyValue?.() ?? "medium";
+    game = await createGame("#game", {
+      ...opts,
+      rows: 16,
+      historySize: 14,
+      difficulty: initialDifficulty,
+    });
     gameInitialized = true;
     refreshStoredControlPanelInteractivity();
     window.game = game;
@@ -2200,6 +2217,12 @@ const opts = {
     // NEW: if user changed rows before game init finished, apply now
     if (pendingRows != null && typeof game?.setRows === "function") {
       game.setRows(pendingRows);
+    }
+    if (
+      pendingDifficulty != null &&
+      typeof game?.setDifficulty === "function"
+    ) {
+      game.setDifficulty(pendingDifficulty);
     }
 
     const state = game?.getState?.();
