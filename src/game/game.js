@@ -65,14 +65,22 @@ const THEME = {
     pegOffsetX: 0,
     pegOffsetXMinRows: 8,
     pegOffsetXMaxRows: 16,
-    pegOffsetXAtMinRows: -35,
+    pegOffsetXAtMinRows: -37.5,
     pegOffsetXAtMaxRows: -20,
     boxOffsetX: 0,
     boxOffsetY: 0,
+    boxRowWidthScaleMinRows: 8,
+    boxRowWidthScaleMaxRows: 16,
+    boxRowWidthScaleAtMinRows: 1.0,
+    boxRowWidthScaleAtMaxRows: 0.9,
     historyOffsetX: 0,
     historyOffsetY: 0,
     spawnOffsetX: 0,
     spawnOffsetY: 0,
+    spawnRangeXMinRows: 16,
+    spawnRangeXMaxRows: 8,
+    spawnRangeXAtMinRows: 120,
+    spawnRangeXAtMaxRows: 60,
     spawnCompensatePegOffset: true,
     spawnClampPadding: 0,
   },
@@ -82,18 +90,30 @@ const THEME = {
 };
 
 const PHYS = {
-  gravity: 1100,
+  gravity: 10000,
   drag: 0.993,
-  maxSpeed: 170,
+  maxSpeed: 300,
+  spawnSpeed: 300,
+  spawnAngleJitter: 0,
+  minSpeed: 300,
+  constantSpeed: 300,
+  constantSpeedBaseRows: 16,
   restitution: 0.36,
   wallRestitution: 0.14,
   tangentialDamp: 0.85,
   collisionSlop: 0.01,
   impulseJitter: 8,
   aimStrength: 0.00105,
-  centerBiasStrength: 0.02,
+  centerBiasStrength: 3.0,
   centerBiasJitter: 0.2,
 };
+
+const PHYS_CLAMP_01_KEYS = new Set([
+  "drag",
+  "restitution",
+  "wallRestitution",
+  "tangentialDamp",
+]);
 
 const BASE_MULTIPLIERS = [
   110, 41, 10, 5, 3, 1.5, 1, 0.5, 0.3, 0.5, 1, 1.5, 3, 5, 10, 41, 110,
@@ -238,10 +258,35 @@ const MULTIPLIER_TABLE_MEDIUM = {
   ],
 };
 
+const MULTIPLIER_TABLE_LOW_VALUES = {
+  8: [2.9, 4, 1.5, 0.3, 0.2, 0.3, 1.5, 4, 2.9],
+  9: [5.6, 2, 1.6, 1, 0.7, 0.7, 1, 1.6, 2, 5.6],
+  10: [8.9, 3, 1.4, 1.1, 1, 0.5, 1, 1.1, 1.4, 3, 8.9],
+  11: [8.4, 3, 1.9, 1.3, 1, 0.7, 0.7, 1, 1.3, 1.9, 3, 8.4],
+  12: [10, 3, 1.6, 1.4, 1.1, 1, 0.5, 1, 1.1, 1.4, 1.6, 3, 10],
+  13: [8.1, 4, 3, 1.9, 1.2, 0.9, 0.7, 0.7, 0.9, 1.2, 1.9, 3, 4, 8.1],
+  14: [7.1, 4, 1.9, 1.4, 1.3, 1.1, 1, 0.5, 1, 1.1, 1.3, 1.4, 1.9, 4, 7.1],
+  15: [15, 8, 3, 2, 1.5, 1.1, 1, 0.7, 0.7, 1, 1.1, 1.5, 2, 3, 8, 15],
+  16: [16, 9, 2, 1.4, 1.4, 1.2, 1.1, 1, 0.5, 1, 1.1, 1.2, 1.4, 1.4, 2, 9, 16],
+};
+
+const MULTIPLIER_TABLE_HIGH_VALUES = {
+  8: [29, 4, 1.5, 0.3, 0.2, 0.3, 1.5, 4, 29],
+  9: [43, 7, 2, 0.6, 0.2, 0.2, 0.6, 2, 7, 43],
+  10: [76, 10, 3, 0.9, 0.3, 0.2, 0.3, 0.9, 3, 10, 76],
+  11: [120, 14, 5.2, 1.4, 0.4, 0.2, 0.2, 0.4, 1.4, 5.2, 14, 120],
+  12: [170, 24, 8.1, 2, 0.7, 0.2, 0.2, 0.2, 0.7, 2, 8.1, 24, 170],
+  13: [260, 37, 11, 4, 1, 0.2, 0.2, 0.2, 0.2, 1, 4, 11, 37, 260],
+  14: [420, 56, 18, 5, 1.9, 0.3, 0.2, 0.2, 0.2, 0.3, 1.9, 5, 18, 56, 420],
+  15: [620, 83, 27, 8, 3, 0.5, 0.2, 0.2, 0.2, 0.2, 0.5, 3, 8, 27, 83, 620],
+  16: [1000, 130, 26, 9, 4, 2, 0.2, 0.2, 0.2, 0.2, 0.2, 2, 4, 9, 26, 130, 1000],
+};
+
 const DIFFICULTY_SCALES = {
   low: 0.75,
   medium: 1,
   high: 1.35,
+  scripted: 1,
 };
 
 const DEFAULT_DIFFICULTY = "medium";
@@ -257,6 +302,92 @@ function formatMultiplierValue(value) {
   return Math.round(value * 100) / 100;
 }
 
+function getSpeedScaleForRows(rowCount) {
+  const baseRows = Number.isFinite(PHYS.constantSpeedBaseRows)
+    ? PHYS.constantSpeedBaseRows
+    : 16;
+  const safeRows = Math.max(1, rowCount);
+  const safeBase = Math.max(1, baseRows);
+  return safeBase / safeRows;
+}
+
+function clamp01(value) {
+  return Math.max(0, Math.min(1, value));
+}
+
+function getSpawnRangeXForRows(rowCount, pegSpacingX, boxWidth, layout) {
+  const direct = layout?.spawnRangeX;
+  if (Number.isFinite(direct)) return Math.max(0, direct);
+
+  const minRows = Number.isFinite(layout?.spawnRangeXMinRows)
+    ? layout.spawnRangeXMinRows
+    : 8;
+  const maxRows = Number.isFinite(layout?.spawnRangeXMaxRows)
+    ? layout.spawnRangeXMaxRows
+    : 16;
+  const atMin = layout?.spawnRangeXAtMinRows;
+  const atMax = layout?.spawnRangeXAtMaxRows;
+  if (
+    Number.isFinite(atMin) &&
+    Number.isFinite(atMax) &&
+    maxRows !== minRows
+  ) {
+    const t = (rowCount - minRows) / (maxRows - minRows);
+    const clamped = Math.max(0, Math.min(1, t));
+    return Math.max(0, atMin + (atMax - atMin) * clamped);
+  }
+
+  const baseJitter = Math.min(pegSpacingX * 0.35, boxWidth * 0.3);
+  const spawnJitter = Math.max(4, Math.min(24, baseJitter));
+  return spawnJitter * 2;
+}
+
+function getBoxRowWidthScaleForRows(rowCount, layout) {
+  const direct = layout?.boxRowWidthScale;
+  if (Number.isFinite(direct)) return direct;
+
+  const minRows = Number.isFinite(layout?.boxRowWidthScaleMinRows)
+    ? layout.boxRowWidthScaleMinRows
+    : 8;
+  const maxRows = Number.isFinite(layout?.boxRowWidthScaleMaxRows)
+    ? layout.boxRowWidthScaleMaxRows
+    : 16;
+  const atMin = layout?.boxRowWidthScaleAtMinRows;
+  const atMax = layout?.boxRowWidthScaleAtMaxRows;
+  if (
+    Number.isFinite(atMin) &&
+    Number.isFinite(atMax) &&
+    maxRows !== minRows
+  ) {
+    const t = (rowCount - minRows) / (maxRows - minRows);
+    const clamped = Math.max(0, Math.min(1, t));
+    return atMin + (atMax - atMin) * clamped;
+  }
+
+  return 0.9;
+}
+
+function getPhysForRows(rowCount) {
+  const scale = getSpeedScaleForRows(rowCount);
+  const scaled = {};
+  Object.entries(PHYS).forEach(([key, value]) => {
+    if (!Number.isFinite(value)) {
+      scaled[key] = value;
+      return;
+    }
+    if (key === "constantSpeedBaseRows") {
+      scaled[key] = value;
+      return;
+    }
+    let next = value * scale;
+    if (PHYS_CLAMP_01_KEYS.has(key)) {
+      next = clamp01(next);
+    }
+    scaled[key] = next;
+  });
+  return scaled;
+}
+
 function buildDifficultyTable(scale) {
   const table = {};
   Object.keys(MULTIPLIER_TABLE_MEDIUM).forEach((rowKey) => {
@@ -269,10 +400,33 @@ function buildDifficultyTable(scale) {
   return table;
 }
 
+function buildValueTable(valuesByRow, colorSource) {
+  const table = {};
+  Object.keys(valuesByRow).forEach((rowKey) => {
+    const values = valuesByRow[rowKey];
+    const source = colorSource[rowKey] || [];
+    table[rowKey] = values.map((value, index) => ({
+      value,
+      color: source[index]?.color ?? 0xffffff,
+    }));
+  });
+  return table;
+}
+
+const MULTIPLIER_TABLE_LOW = buildValueTable(
+  MULTIPLIER_TABLE_LOW_VALUES,
+  MULTIPLIER_TABLE_MEDIUM
+);
+const MULTIPLIER_TABLE_HIGH = buildValueTable(
+  MULTIPLIER_TABLE_HIGH_VALUES,
+  MULTIPLIER_TABLE_MEDIUM
+);
+
 const MULTIPLIER_TABLES = {
-  low: buildDifficultyTable(DIFFICULTY_SCALES.low),
+  low: MULTIPLIER_TABLE_LOW,
   medium: MULTIPLIER_TABLE_MEDIUM,
-  high: buildDifficultyTable(DIFFICULTY_SCALES.high),
+  high: MULTIPLIER_TABLE_HIGH,
+  scripted: MULTIPLIER_TABLE_MEDIUM,
 };
 
 function getMultiplierTable(difficulty) {
@@ -461,10 +615,18 @@ export async function createGame(mount, opts = {}) {
   let boxCount = multipliers.length;
 
   let probabilities = generateBinomialProbabilities(rows);
+  let phys = getPhysForRows(rows);
 
   let isAnimating = false;
   let activeDrops = 0;
   let history = [];
+  let scriptConfig = {
+    enabled: false,
+    mode: "index",
+    sequence: [],
+    loop: true,
+    cursor: 0,
+  };
 
   const markDropStart = () => {
     activeDrops += 1;
@@ -474,6 +636,51 @@ export async function createGame(mount, opts = {}) {
   const markDropEnd = () => {
     activeDrops = Math.max(0, activeDrops - 1);
     isAnimating = activeDrops > 0;
+  };
+
+  const normalizeScriptMode = (mode) => (mode === "value" ? "value" : "index");
+
+  const resetScriptCursor = () => {
+    scriptConfig.cursor = 0;
+  };
+
+  const resolveScriptedIndex = (entry) => {
+    if (scriptConfig.mode === "value") {
+      const value = Number(entry?.value ?? entry);
+      if (!Number.isFinite(value)) return null;
+      let bestIndex = null;
+      let bestDiff = Infinity;
+      for (let i = 0; i < multipliers.length; i++) {
+        const current = Number(multipliers[i]?.value ?? multipliers[i]);
+        if (!Number.isFinite(current)) continue;
+        const diff = Math.abs(current - value);
+        if (diff < bestDiff) {
+          bestDiff = diff;
+          bestIndex = i;
+        }
+      }
+      return bestIndex;
+    }
+
+    const index = Number(entry?.index ?? entry);
+    if (!Number.isFinite(index)) return null;
+    return Math.max(0, Math.min(Math.round(index), boxCount - 1));
+  };
+
+  const getNextScriptedIndex = () => {
+    if (!scriptConfig.enabled || scriptConfig.sequence.length === 0) {
+      return null;
+    }
+    const entry = scriptConfig.sequence[scriptConfig.cursor];
+    scriptConfig.cursor += 1;
+    if (scriptConfig.cursor >= scriptConfig.sequence.length) {
+      if (scriptConfig.loop) {
+        scriptConfig.cursor = 0;
+      } else {
+        scriptConfig.enabled = false;
+      }
+    }
+    return resolveScriptedIndex(entry);
   };
 
   const app = new Application();
@@ -733,8 +940,11 @@ export async function createGame(mount, opts = {}) {
     boxTexts = [];
 
     const gap = THEME.multiplierBox.gap;
-    const maxBoxesWidth = baseWidth * 0.9;
     const layout = THEME.layout || {};
+    const maxBoxesWidth = Math.min(
+      baseWidth * getBoxRowWidthScaleForRows(rows, layout),
+      gridWidth
+    );
 
     // Dynamically calculate the width for the boxes based on available space
     const wFit = (maxBoxesWidth - boxCount * gap) / boxCount;
@@ -1020,7 +1230,7 @@ export async function createGame(mount, opts = {}) {
     const nx = dx / d;
     const ny = dy / d;
 
-    const penetration = r - d + PHYS.collisionSlop;
+    const penetration = r - d + phys.collisionSlop;
     state.x += nx * penetration;
     state.y += ny * penetration;
 
@@ -1031,20 +1241,20 @@ export async function createGame(mount, opts = {}) {
 
       const vDotT = state.vx * tx + state.vy * ty;
 
-      const j = -(1 + PHYS.restitution) * vDotN;
+      const j = -(1 + phys.restitution) * vDotN;
       state.vx += j * nx;
       state.vy += j * ny;
 
       state.vx =
-        tx * (vDotT * PHYS.tangentialDamp) +
+        tx * (vDotT * phys.tangentialDamp) +
         nx * (state.vx * nx + state.vy * ny);
       state.vy =
-        ty * (vDotT * PHYS.tangentialDamp) +
+        ty * (vDotT * phys.tangentialDamp) +
         ny * (state.vx * nx + state.vy * ny);
 
-      state.vx += (Math.random() - 0.5) * PHYS.impulseJitter;
+      state.vx += (Math.random() - 0.5) * phys.impulseJitter;
 
-      const centerBiasStrength = PHYS.centerBiasStrength ?? 0;
+      const centerBiasStrength = phys.centerBiasStrength ?? 0;
       if (centerBiasStrength > 0 && Math.abs(state.vx) > 1e-4) {
         const toCenter = apexX + pegOffsetX - state.x;
         const directionToCenter = Math.sign(toCenter);
@@ -1053,7 +1263,7 @@ export async function createGame(mount, opts = {}) {
           const distanceFactor = Math.min(1, Math.abs(toCenter) / maxDistance);
           if (distanceFactor > 0) {
             const jitter =
-              1 + (Math.random() - 0.5) * (PHYS.centerBiasJitter ?? 0);
+              1 + (Math.random() - 0.5) * (phys.centerBiasJitter ?? 0);
             const bias = centerBiasStrength * distanceFactor * jitter;
             const movingTowardCenter =
               Math.sign(state.vx) === directionToCenter;
@@ -1115,8 +1325,12 @@ export async function createGame(mount, opts = {}) {
         : 0;
       const spawnCenterX = boxCenterBounds.center + spawnOffsetX;
 
-      const baseJitter = Math.min(pegSpacingX * 0.35, boxWidth * 0.3);
-      const spawnJitter = Math.max(4, Math.min(24, baseJitter));
+      const spawnRangeX = getSpawnRangeXForRows(
+        rows,
+        pegSpacingX,
+        boxWidth,
+        layout
+      );
       const spawnClampPadding = Number.isFinite(layout.spawnClampPadding)
         ? layout.spawnClampPadding
         : 0;
@@ -1127,19 +1341,44 @@ export async function createGame(mount, opts = {}) {
       const spawnLeft = boundsLeft - clampPad;
       const spawnRight = boundsRight + clampPad;
       const playBounds = { left: spawnLeft, right: spawnRight };
+
+      const scriptedDrop =
+        difficulty === "scripted" &&
+        scriptConfig.enabled &&
+        scriptConfig.sequence.length > 0 &&
+        Number.isFinite(targetIndex) &&
+        targetIndex >= 0;
+      const targetBox = scriptedDrop ? boxGraphics[targetIndex] : null;
+      const targetX =
+        targetBox && Number.isFinite(targetBox.x)
+          ? targetBox.x + boxWidth / 2
+          : null;
       const spawnX = Math.max(
         spawnLeft,
         Math.min(
           spawnRight,
-          spawnCenterX + (Math.random() - 0.5) * spawnJitter * 2
+          spawnCenterX + (Math.random() - 0.5) * spawnRangeX
         )
       );
+      const spawnSpeed =
+        Number.isFinite(phys.constantSpeed) && phys.constantSpeed > 0
+          ? phys.constantSpeed
+          : Number.isFinite(phys.spawnSpeed)
+            ? phys.spawnSpeed
+            : 0;
+      const spawnAngleJitter = Number.isFinite(phys.spawnAngleJitter)
+        ? phys.spawnAngleJitter
+        : 0;
+      const spawnAngle =
+        Math.PI / 2 + (Math.random() - 0.5) * spawnAngleJitter;
+      const spawnVx = Math.cos(spawnAngle) * spawnSpeed;
+      const spawnVy = Math.sin(spawnAngle) * spawnSpeed;
 
       const state = {
         x: spawnX,
         y: startPos.y - pegSpacingY * 0.9 + spawnOffsetY,
-        vx: (Math.random() - 0.5) * 120,
-        vy: 0,
+        vx: spawnVx,
+        vy: spawnVy,
       };
       activeBall.x = state.x;
       activeBall.y = state.y;
@@ -1151,14 +1390,20 @@ export async function createGame(mount, opts = {}) {
 
         const dt = Math.min(1 / 30, ticker.deltaMS / 1000);
 
-        state.vy += PHYS.gravity * dt;
+        state.vy += phys.gravity * dt;
 
-        state.vx *= Math.pow(PHYS.drag, dt * 60);
-        state.vy *= Math.pow(PHYS.drag, dt * 60);
+        state.vx *= Math.pow(phys.drag, dt * 60);
+        state.vy *= Math.pow(phys.drag, dt * 60);
 
+        if (scriptedDrop && Number.isFinite(targetX)) {
+          const dx = targetX - state.x;
+          state.vx += dx * phys.aimStrength * dt * 60;
+        }
+
+        const speedLimit = Number.isFinite(phys.maxSpeed) ? phys.maxSpeed : 0;
         const sp = Math.hypot(state.vx, state.vy);
-        if (sp > PHYS.maxSpeed) {
-          const k = PHYS.maxSpeed / sp;
+        if (speedLimit > 0 && sp > speedLimit) {
+          const k = speedLimit / sp;
           state.vx *= k;
           state.vy *= k;
         }
@@ -1172,16 +1417,60 @@ export async function createGame(mount, opts = {}) {
 
         if (state.x < left) {
           state.x = left;
-          if (state.vx < 0) state.vx = -state.vx * PHYS.wallRestitution;
+          if (state.vx < 0) state.vx = -state.vx * phys.wallRestitution;
         } else if (state.x > right) {
           state.x = right;
-          if (state.vx > 0) state.vx = -state.vx * PHYS.wallRestitution;
+          if (state.vx > 0) state.vx = -state.vx * phys.wallRestitution;
         }
 
         let hit = false;
         for (let i = 0; i < pegPoints.length; i++) {
           if (resolvePegCollision(state, pegPoints[i].x, pegPoints[i].y))
             hit = true;
+        }
+
+        const maxSpeed = Number.isFinite(phys.maxSpeed) ? phys.maxSpeed : 0;
+        const minSpeed = Number.isFinite(phys.minSpeed) ? phys.minSpeed : 0;
+        const constantSpeed = Number.isFinite(phys.constantSpeed)
+          ? phys.constantSpeed
+          : 0;
+        let speed = Math.hypot(state.vx, state.vy);
+        if (constantSpeed > 0) {
+          const target =
+            maxSpeed > 0 ? Math.min(constantSpeed, maxSpeed) : constantSpeed;
+          if (target > 0) {
+            if (speed < 1e-4) {
+              state.vx = 0;
+              state.vy = target;
+            } else {
+              const k = target / speed;
+              state.vx *= k;
+              state.vy *= k;
+            }
+          }
+        } else {
+          if (maxSpeed > 0 && speed > maxSpeed) {
+            const k = maxSpeed / speed;
+            state.vx *= k;
+            state.vy *= k;
+            speed = maxSpeed;
+          }
+          const floorSpeed =
+            minSpeed > 0
+              ? maxSpeed > 0
+                ? Math.min(minSpeed, maxSpeed)
+                : minSpeed
+              : 0;
+          if (floorSpeed > 0 && speed < floorSpeed) {
+            if (speed < 1e-4) {
+              state.vx = 0;
+              state.vy = floorSpeed;
+            } else {
+              const k = floorSpeed / speed;
+              state.vx *= k;
+              state.vy *= k;
+            }
+          }
         }
 
         const squash = 1 + Math.min(0.18, Math.abs(state.vy) / 2400) * 0.12;
@@ -1355,10 +1644,19 @@ export async function createGame(mount, opts = {}) {
           probs = generateBinomialProbabilities(rows);
         }
 
-        const targetIndex = Math.max(
-          0,
-          Math.min(selectByProbability(probs), boxCount - 1)
-        );
+        let targetIndex = null;
+        if (difficulty === "scripted") {
+          const scriptedIndex = getNextScriptedIndex();
+          if (scriptedIndex != null) {
+            targetIndex = scriptedIndex;
+          }
+        }
+        if (targetIndex == null) {
+          targetIndex = Math.max(
+            0,
+            Math.min(selectByProbability(probs), boxCount - 1)
+          );
+        }
 
         const landedIndex = await simulateDrop(targetIndex);
 
@@ -1407,6 +1705,27 @@ export async function createGame(mount, opts = {}) {
       return getWinChance(minMultiplier);
     },
 
+    setOutcomeScript({
+      sequence = [],
+      mode = "index",
+      loop = true,
+      enabled = true,
+    } = {}) {
+      scriptConfig = {
+        enabled: Boolean(enabled),
+        mode: normalizeScriptMode(mode),
+        sequence: Array.isArray(sequence) ? sequence.slice() : [],
+        loop: Boolean(loop),
+        cursor: 0,
+      };
+    },
+
+    clearOutcomeScript() {
+      scriptConfig.sequence = [];
+      scriptConfig.enabled = false;
+      resetScriptCursor();
+    },
+
     setDifficulty(newDifficulty) {
       if (isAnimating) return;
       const normalized = normalizeDifficulty(newDifficulty);
@@ -1429,6 +1748,7 @@ export async function createGame(mount, opts = {}) {
       multipliers = getMultipliersForRows(rows, difficulty);
       boxCount = multipliers.length;
       probabilities = generateBinomialProbabilities(rows);
+      phys = getPhysForRows(rows);
 
       resize();
     },

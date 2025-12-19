@@ -2050,6 +2050,14 @@ const opts = {
       totalTiles,
       maxMines,
       initialMines,
+      difficulties: ["low", "medium", "high", "scripted"],
+      difficultyLabels: {
+        low: "Low",
+        medium: "Medium",
+        high: "High",
+        scripted: "Scripted (not random)",
+      },
+      initialDifficulty: "medium",
     });
 
     refreshStoredControlPanelInteractivity();
