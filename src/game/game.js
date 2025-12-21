@@ -98,14 +98,16 @@ const PHYS = {
   minSpeed: 300,
   constantSpeed: 300,
   constantSpeedBaseRows: 16,
-  restitution: 0.36,
+  restitution: 0.18,
   wallRestitution: 0.14,
   tangentialDamp: 0.85,
   collisionSlop: 0.01,
   impulseJitter: 8,
   aimStrength: 0.00105,
-  centerBiasStrength: 3.0,
-  centerBiasJitter: 0.2,
+  centerBiasStrength: 4.0,
+  centerBiasJitter: 0.25,
+  bounceAngleJitter: 0.02,
+  keepDirectionChance: 0.15,
 };
 
 const PHYS_CLAMP_01_KEYS = new Set([
@@ -113,6 +115,9 @@ const PHYS_CLAMP_01_KEYS = new Set([
   "restitution",
   "wallRestitution",
   "tangentialDamp",
+  "centerBiasStrength",
+  "centerBiasJitter",
+  "keepDirectionChance",
 ]);
 
 const BASE_MULTIPLIERS = [
@@ -286,7 +291,6 @@ const DIFFICULTY_SCALES = {
   low: 0.75,
   medium: 1,
   high: 1.35,
-  scripted: 1,
 };
 
 const DEFAULT_DIFFICULTY = "medium";
@@ -313,6 +317,12 @@ function getSpeedScaleForRows(rowCount) {
 
 function clamp01(value) {
   return Math.max(0, Math.min(1, value));
+}
+
+function normalizeWinRateValue(value) {
+  if (!Number.isFinite(value)) return null;
+  const normalized = value > 1 ? value / 100 : value;
+  return clamp01(normalized);
 }
 
 function getSpawnRangeXForRows(rowCount, pegSpacingX, boxWidth, layout) {
@@ -426,7 +436,6 @@ const MULTIPLIER_TABLES = {
   low: MULTIPLIER_TABLE_LOW,
   medium: MULTIPLIER_TABLE_MEDIUM,
   high: MULTIPLIER_TABLE_HIGH,
-  scripted: MULTIPLIER_TABLE_MEDIUM,
 };
 
 function getMultiplierTable(difficulty) {
@@ -528,6 +537,159 @@ function generateBinomialProbabilities(n) {
   return probs;
 }
 
+const WINRATE_BIAS_RANGE = 8;
+
+function normalizeProbabilities(probabilities) {
+  const sum = probabilities.reduce((acc, value) => acc + value, 0);
+  if (!Number.isFinite(sum) || sum <= 0) return probabilities.slice();
+  return probabilities.map((value) => value / sum);
+}
+
+function getMultiplierValues(multipliers, count) {
+  const values = [];
+  for (let i = 0; i < count; i++) {
+    const raw = multipliers[i]?.value ?? multipliers[i];
+    const value = Number(raw);
+    values.push(Number.isFinite(value) ? value : 0);
+  }
+  return values;
+}
+
+function getWinChanceFromValues(probabilities, values, minMultiplier) {
+  const threshold = Number.isFinite(minMultiplier) ? minMultiplier : 1;
+  let totalProbability = 0;
+  let winProbability = 0;
+
+  for (let i = 0; i < probabilities.length; i++) {
+    const probability = Number(probabilities[i]);
+    const multiplier = Number(values[i]);
+    if (!Number.isFinite(probability) || probability < 0) {
+      continue;
+    }
+    if (!Number.isFinite(multiplier)) {
+      continue;
+    }
+    totalProbability += probability;
+    if (multiplier >= threshold) {
+      winProbability += probability;
+    }
+  }
+
+  if (totalProbability <= 0) {
+    return null;
+  }
+
+  return winProbability / totalProbability;
+}
+
+function buildWeightedProbabilities(baseProbabilities, values, bias) {
+  const count = Math.min(baseProbabilities.length, values.length);
+  if (count <= 0) return [];
+
+  let min = Infinity;
+  let max = -Infinity;
+  for (let i = 0; i < count; i++) {
+    const value = values[i];
+    if (!Number.isFinite(value)) continue;
+    min = Math.min(min, value);
+    max = Math.max(max, value);
+  }
+
+  if (!Number.isFinite(min) || !Number.isFinite(max) || max === min) {
+    return normalizeProbabilities(baseProbabilities.slice(0, count));
+  }
+
+  const range = max - min;
+  const weights = new Array(count);
+  for (let i = 0; i < count; i++) {
+    const base = Number(baseProbabilities[i]);
+    if (!Number.isFinite(base) || base < 0) {
+      weights[i] = 0;
+      continue;
+    }
+    const score = (values[i] - min) / range;
+    const factor = Math.exp(bias * (score - 0.5));
+    weights[i] = base * factor;
+  }
+
+  return normalizeProbabilities(weights);
+}
+
+function buildWinRateProbabilities(
+  baseProbabilities,
+  multipliers,
+  targetWinRate,
+  minMultiplier
+) {
+  if (!Number.isFinite(targetWinRate)) {
+    return baseProbabilities.slice();
+  }
+
+  const clampedTarget = clamp01(targetWinRate);
+  const count = Math.min(baseProbabilities.length, multipliers.length);
+  if (count <= 0) {
+    return baseProbabilities.slice();
+  }
+
+  const base = baseProbabilities.slice(0, count);
+  const values = getMultiplierValues(multipliers, count);
+
+  let lowBias = -WINRATE_BIAS_RANGE;
+  let highBias = WINRATE_BIAS_RANGE;
+
+  let lowProbs = buildWeightedProbabilities(base, values, lowBias);
+  let highProbs = buildWeightedProbabilities(base, values, highBias);
+
+  let lowChance = getWinChanceFromValues(
+    lowProbs,
+    values,
+    minMultiplier
+  );
+  let highChance = getWinChanceFromValues(
+    highProbs,
+    values,
+    minMultiplier
+  );
+
+  if (!Number.isFinite(lowChance) || !Number.isFinite(highChance)) {
+    return normalizeProbabilities(base);
+  }
+
+  if (lowChance > highChance) {
+    [lowBias, highBias] = [highBias, lowBias];
+    [lowChance, highChance] = [highChance, lowChance];
+  }
+
+  if (clampedTarget <= lowChance) {
+    return lowProbs;
+  }
+  if (clampedTarget >= highChance) {
+    return highProbs;
+  }
+
+  for (let i = 0; i < 30; i++) {
+    const midBias = (lowBias + highBias) / 2;
+    const midProbs = buildWeightedProbabilities(base, values, midBias);
+    const midChance = getWinChanceFromValues(
+      midProbs,
+      values,
+      minMultiplier
+    );
+    if (!Number.isFinite(midChance)) {
+      break;
+    }
+    if (midChance < clampedTarget) {
+      lowBias = midBias;
+      lowChance = midChance;
+    } else {
+      highBias = midBias;
+      highChance = midChance;
+    }
+  }
+
+  return buildWeightedProbabilities(base, values, highBias);
+}
+
 function selectByProbability(probabilities) {
   const sum = probabilities.reduce((a, b) => a + b, 0);
   if (sum <= 0) return 0;
@@ -614,19 +776,17 @@ export async function createGame(mount, opts = {}) {
   let multipliers = getMultipliersForRows(rows, difficulty);
   let boxCount = multipliers.length;
 
-  let probabilities = generateBinomialProbabilities(rows);
+  let baseProbabilities = generateBinomialProbabilities(rows);
+  let probabilities = baseProbabilities.slice();
+  let winRateTarget = normalizeWinRateValue(opts.winRate);
+  let winRateMinMultiplier = Number.isFinite(opts.winRateMinMultiplier)
+    ? opts.winRateMinMultiplier
+    : 1;
   let phys = getPhysForRows(rows);
 
   let isAnimating = false;
   let activeDrops = 0;
   let history = [];
-  let scriptConfig = {
-    enabled: false,
-    mode: "index",
-    sequence: [],
-    loop: true,
-    cursor: 0,
-  };
 
   const markDropStart = () => {
     activeDrops += 1;
@@ -638,50 +798,16 @@ export async function createGame(mount, opts = {}) {
     isAnimating = activeDrops > 0;
   };
 
-  const normalizeScriptMode = (mode) => (mode === "value" ? "value" : "index");
-
-  const resetScriptCursor = () => {
-    scriptConfig.cursor = 0;
+  const rebuildProbabilities = () => {
+    probabilities = buildWinRateProbabilities(
+      baseProbabilities,
+      multipliers,
+      winRateTarget,
+      winRateMinMultiplier
+    );
   };
 
-  const resolveScriptedIndex = (entry) => {
-    if (scriptConfig.mode === "value") {
-      const value = Number(entry?.value ?? entry);
-      if (!Number.isFinite(value)) return null;
-      let bestIndex = null;
-      let bestDiff = Infinity;
-      for (let i = 0; i < multipliers.length; i++) {
-        const current = Number(multipliers[i]?.value ?? multipliers[i]);
-        if (!Number.isFinite(current)) continue;
-        const diff = Math.abs(current - value);
-        if (diff < bestDiff) {
-          bestDiff = diff;
-          bestIndex = i;
-        }
-      }
-      return bestIndex;
-    }
-
-    const index = Number(entry?.index ?? entry);
-    if (!Number.isFinite(index)) return null;
-    return Math.max(0, Math.min(Math.round(index), boxCount - 1));
-  };
-
-  const getNextScriptedIndex = () => {
-    if (!scriptConfig.enabled || scriptConfig.sequence.length === 0) {
-      return null;
-    }
-    const entry = scriptConfig.sequence[scriptConfig.cursor];
-    scriptConfig.cursor += 1;
-    if (scriptConfig.cursor >= scriptConfig.sequence.length) {
-      if (scriptConfig.loop) {
-        scriptConfig.cursor = 0;
-      } else {
-        scriptConfig.enabled = false;
-      }
-    }
-    return resolveScriptedIndex(entry);
-  };
+  rebuildProbabilities();
 
   const app = new Application();
 
@@ -1219,6 +1345,16 @@ export async function createGame(mount, opts = {}) {
     });
   }
 
+  function clampStateSpeed(state, maxSpeed) {
+    if (!Number.isFinite(maxSpeed) || maxSpeed <= 0) return;
+    const speed = Math.hypot(state.vx, state.vy);
+    if (speed > maxSpeed) {
+      const k = maxSpeed / speed;
+      state.vx *= k;
+      state.vy *= k;
+    }
+  }
+
   function resolvePegCollision(state, pegX, pegY) {
     const dx = state.x - pegX;
     const dy = state.y - pegY;
@@ -1236,12 +1372,16 @@ export async function createGame(mount, opts = {}) {
 
     const vDotN = state.vx * nx + state.vy * ny;
     if (vDotN < 0) {
+      const incomingVx = state.vx;
       const tx = -ny;
       const ty = nx;
 
       const vDotT = state.vx * tx + state.vy * ty;
 
-      const j = -(1 + phys.restitution) * vDotN;
+      let j = -(1 + phys.restitution) * vDotN;
+      if (state.y > pegY) {
+        j = 0;
+      }
       state.vx += j * nx;
       state.vy += j * ny;
 
@@ -1253,6 +1393,42 @@ export async function createGame(mount, opts = {}) {
         ny * (state.vx * nx + state.vy * ny);
 
       state.vx += (Math.random() - 0.5) * phys.impulseJitter;
+
+      const angleJitter = Number.isFinite(phys.bounceAngleJitter)
+        ? phys.bounceAngleJitter
+        : 0;
+      if (angleJitter > 0) {
+        const angle = (Math.random() - 0.5) * angleJitter * 2;
+        const cos = Math.cos(angle);
+        const sin = Math.sin(angle);
+        const vx = state.vx;
+        const vy = state.vy;
+        state.vx = vx * cos - vy * sin;
+        state.vy = vx * sin + vy * cos;
+      }
+
+      const keepChance = Number.isFinite(phys.keepDirectionChance)
+        ? phys.keepDirectionChance
+        : 0;
+      const shouldKeep = Math.random() < keepChance;
+      if (!shouldKeep) {
+        let incomingSign = Math.sign(incomingVx);
+        if (incomingSign === 0) {
+          incomingSign = Math.random() < 0.5 ? -1 : 1;
+        }
+        const outgoingSign = Math.sign(state.vx);
+        if (outgoingSign === 0 || outgoingSign === incomingSign) {
+          state.vx = -state.vx;
+          if (Math.abs(state.vx) < 1e-4) {
+            const nudge = Math.max(
+              1,
+              Math.abs(incomingVx),
+              phys.impulseJitter
+            );
+            state.vx = -incomingSign * nudge;
+          }
+        }
+      }
 
       const centerBiasStrength = phys.centerBiasStrength ?? 0;
       if (centerBiasStrength > 0 && Math.abs(state.vx) > 1e-4) {
@@ -1271,6 +1447,9 @@ export async function createGame(mount, opts = {}) {
           }
         }
       }
+
+      clampStateSpeed(state, phys.maxSpeed);
+
       spawnRipple(pegX, pegY - pegRadius * 0.2);
       return true;
     }
@@ -1342,13 +1521,10 @@ export async function createGame(mount, opts = {}) {
       const spawnRight = boundsRight + clampPad;
       const playBounds = { left: spawnLeft, right: spawnRight };
 
-      const scriptedDrop =
-        difficulty === "scripted" &&
-        scriptConfig.enabled &&
-        scriptConfig.sequence.length > 0 &&
-        Number.isFinite(targetIndex) &&
-        targetIndex >= 0;
-      const targetBox = scriptedDrop ? boxGraphics[targetIndex] : null;
+      const targetBox =
+        Number.isFinite(targetIndex) && targetIndex >= 0
+          ? boxGraphics[targetIndex]
+          : null;
       const targetX =
         targetBox && Number.isFinite(targetBox.x)
           ? targetBox.x + boxWidth / 2
@@ -1395,7 +1571,7 @@ export async function createGame(mount, opts = {}) {
         state.vx *= Math.pow(phys.drag, dt * 60);
         state.vy *= Math.pow(phys.drag, dt * 60);
 
-        if (scriptedDrop && Number.isFinite(targetX)) {
+        if (Number.isFinite(targetX)) {
           const dx = targetX - state.x;
           state.vx += dx * phys.aimStrength * dt * 60;
         }
@@ -1641,22 +1817,15 @@ export async function createGame(mount, opts = {}) {
 
         let probs = probabilities;
         if (!Array.isArray(probs) || probs.length !== fullBoxCount) {
-          probs = generateBinomialProbabilities(rows);
+          baseProbabilities = generateBinomialProbabilities(rows);
+          rebuildProbabilities();
+          probs = probabilities;
         }
 
-        let targetIndex = null;
-        if (difficulty === "scripted") {
-          const scriptedIndex = getNextScriptedIndex();
-          if (scriptedIndex != null) {
-            targetIndex = scriptedIndex;
-          }
-        }
-        if (targetIndex == null) {
-          targetIndex = Math.max(
-            0,
-            Math.min(selectByProbability(probs), boxCount - 1)
-          );
-        }
+        const targetIndex = Math.max(
+          0,
+          Math.min(selectByProbability(probs), boxCount - 1)
+        );
 
         const landedIndex = await simulateDrop(targetIndex);
 
@@ -1689,12 +1858,30 @@ export async function createGame(mount, opts = {}) {
         difficulty,
         boxCount,
         multipliers: multipliers.slice(),
+        winRateTarget,
+        winRateMinMultiplier,
       };
     },
 
     setProbabilities(weights) {
       if (!Array.isArray(weights) || weights.length !== boxCount) return;
-      probabilities = [...weights];
+      baseProbabilities = [...weights];
+      rebuildProbabilities();
+    },
+
+    setWinRate(value, minMultiplier = 1) {
+      let nextValue = value;
+      let nextMinMultiplier = minMultiplier;
+      if (value && typeof value === "object") {
+        nextValue = value.value;
+        nextMinMultiplier = value.minMultiplier;
+      }
+
+      winRateTarget = normalizeWinRateValue(nextValue);
+      winRateMinMultiplier = Number.isFinite(nextMinMultiplier)
+        ? nextMinMultiplier
+        : 1;
+      rebuildProbabilities();
     },
 
     getRtpEstimate() {
@@ -1705,27 +1892,6 @@ export async function createGame(mount, opts = {}) {
       return getWinChance(minMultiplier);
     },
 
-    setOutcomeScript({
-      sequence = [],
-      mode = "index",
-      loop = true,
-      enabled = true,
-    } = {}) {
-      scriptConfig = {
-        enabled: Boolean(enabled),
-        mode: normalizeScriptMode(mode),
-        sequence: Array.isArray(sequence) ? sequence.slice() : [],
-        loop: Boolean(loop),
-        cursor: 0,
-      };
-    },
-
-    clearOutcomeScript() {
-      scriptConfig.sequence = [];
-      scriptConfig.enabled = false;
-      resetScriptCursor();
-    },
-
     setDifficulty(newDifficulty) {
       if (isAnimating) return;
       const normalized = normalizeDifficulty(newDifficulty);
@@ -1733,6 +1899,7 @@ export async function createGame(mount, opts = {}) {
       difficulty = normalized;
       multipliers = getMultipliersForRows(rows, difficulty);
       boxCount = multipliers.length;
+      rebuildProbabilities();
       createBoxes();
       updateHistoryDisplay();
     },
@@ -1747,7 +1914,8 @@ export async function createGame(mount, opts = {}) {
       rows = clamped;
       multipliers = getMultipliersForRows(rows, difficulty);
       boxCount = multipliers.length;
-      probabilities = generateBinomialProbabilities(rows);
+      baseProbabilities = generateBinomialProbabilities(rows);
+      rebuildProbabilities();
       phys = getPhysForRows(rows);
 
       resize();

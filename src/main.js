@@ -58,6 +58,8 @@ let autoRunFlag = false;
 let autoRoundInProgress = false;
 let autoBetsRemaining = Infinity;
 let autoResetTimer = null;
+let autoPlinkoTimer = null;
+let autoPlinkoInFlight = 0;
 let autoStopShouldComplete = false;
 let autoStopFinishing = false;
 let autoRoundWinPopupHandled = false;
@@ -74,6 +76,12 @@ let leaveSessionInProgress = false;
 let leaveSessionPromise = null;
 let gameInitialized = false;
 let sessionExpirationRecoveryTask = null;
+let plinkoSyncTimer = null;
+let plinkoSyncState = {
+  rows: null,
+  difficulty: null,
+  controlsClickable: null,
+};
 
 // NEW: store pending rows change if control panel fires before game is ready
 let pendingRows = null;
@@ -114,6 +122,39 @@ function getCurrentBetValue() {
   return controlPanel?.getBetValue?.() ?? 0;
 }
 
+let autoBetToastNode = null;
+let autoBetToastTimer = null;
+
+function showAutoBetToast(message, { durationMs = 1500 } = {}) {
+  if (typeof document === "undefined") {
+    return;
+  }
+
+  if (!autoBetToastNode) {
+    const container = document.createElement("div");
+    container.className = "auto-bet-toast-container";
+
+    const toast = document.createElement("div");
+    toast.className = "auto-bet-toast";
+
+    container.appendChild(toast);
+    document.body.appendChild(container);
+    autoBetToastNode = toast;
+  }
+
+  autoBetToastNode.textContent = message;
+  autoBetToastNode.classList.add("is-visible");
+
+  if (autoBetToastTimer) {
+    clearTimeout(autoBetToastTimer);
+  }
+
+  autoBetToastTimer = setTimeout(() => {
+    autoBetToastNode?.classList.remove("is-visible");
+    autoBetToastTimer = null;
+  }, durationMs);
+}
+
 function syncDemoModeWithBetAmount(value = getCurrentBetValue()) {
   const shouldUseServerMode = hasPositiveBetAmount(value);
   setDemoMode(!shouldUseServerMode);
@@ -145,6 +186,14 @@ function isAutoControlsInteractivityAllowed() {
   return isControlPanelInteractivityAllowed();
 }
 
+function isMinesGameInstance() {
+  return typeof game?.getAutoSelections === "function";
+}
+
+function isPlinkoGameInstance() {
+  return typeof game?.startRound === "function" && !isMinesGameInstance();
+}
+
 const gameRoot = document.querySelector("#game");
 let gameLoadingOverlay = gameRoot?.querySelector(".loading") ?? null;
 if (!demoMode && gameRoot && gameLoadingOverlay) {
@@ -155,7 +204,9 @@ let totalProfitMultiplierValue = 1;
 let totalProfitAmountDisplayValue = "0.00000000";
 
 const AUTO_RESET_DELAY_MS = 1500;
+const AUTO_PLINKO_BET_INTERVAL_MS = 900;
 let autoResetDelayMs = AUTO_RESET_DELAY_MS;
+let autoPlinkoIntervalMs = AUTO_PLINKO_BET_INTERVAL_MS;
 
 const SERVER_RESPONSE_DELAY_MS = 0;
 const SERVER_INITIALIZATION_RETRY_DELAY_MS = 3000;
@@ -418,20 +469,37 @@ function setCurrentAutoRoundBetAmount(value) {
   autoRoundBetAmount = Number.isFinite(numeric) ? numeric : 0;
 }
 
-function recordAutoRoundOutcome({ status, winAmount }) {
+function recordAutoRoundOutcome({
+  status,
+  winAmount,
+  profitDelta,
+  betAmount,
+} = {}) {
   autoRoundLastStatus = normalizeAutoplayStatus(status);
-  const betAmount = clampToZero(autoRoundBetAmount);
-  const numericWinAmount = clampToZero(winAmount);
+  const numericBetAmount = coerceNumericValue(betAmount);
+  const resolvedBetAmount = clampToZero(
+    numericBetAmount != null ? numericBetAmount : autoRoundBetAmount
+  );
+  const numericWinAmount = coerceNumericValue(winAmount);
+  const normalizedWinAmount =
+    numericWinAmount != null ? Math.max(0, numericWinAmount) : null;
+  let nextProfitDelta = 0;
 
-  if (autoRoundLastStatus === "win") {
-    autoRoundProfitDelta = numericWinAmount - betAmount;
+  if (Number.isFinite(profitDelta)) {
+    nextProfitDelta = profitDelta;
+  } else if (normalizedWinAmount != null) {
+    nextProfitDelta = normalizedWinAmount - resolvedBetAmount;
+  } else if (autoRoundLastStatus === "win") {
+    nextProfitDelta = normalizedWinAmount != null
+      ? normalizedWinAmount - resolvedBetAmount
+      : -resolvedBetAmount;
   } else if (autoRoundLastStatus === "lost") {
-    autoRoundProfitDelta = -betAmount;
-  } else {
-    autoRoundProfitDelta = 0;
+    nextProfitDelta = -resolvedBetAmount;
   }
 
-  if (!demoMode && autoRunActive) {
+  autoRoundProfitDelta = nextProfitDelta;
+
+  if (autoRunActive) {
     autoSessionNetProfit += autoRoundProfitDelta;
   }
 }
@@ -510,6 +578,9 @@ function stopAutoRunForLimit(reason) {
   autoStopShouldComplete = true;
   autoStopFinishing = true;
   setAutoRunUIState(true);
+  if (isPlinkoGameInstance()) {
+    stopPlinkoAutoTimer();
+  }
 
   if (!demoMode && !suppressRelay) {
     sendRelayMessage("action:stop-autobet", { reason });
@@ -1013,6 +1084,39 @@ function refreshStoredControlPanelInteractivity() {
   );
 }
 
+function syncPlinkoControlPanelState({ force = false } = {}) {
+  if (!controlPanel || typeof game?.getState !== "function") return;
+  const state = game.getState();
+  if (!state) return;
+
+  const { rows, difficulty, isAnimating } = state;
+  if (force || rows !== plinkoSyncState.rows) {
+    controlPanel.setRowsValue?.(rows, { emit: false });
+    plinkoSyncState.rows = rows;
+  }
+  if (force || difficulty !== plinkoSyncState.difficulty) {
+    controlPanel.setDifficultyValue?.(difficulty, { emit: false });
+    plinkoSyncState.difficulty = difficulty;
+  }
+
+  const clickable =
+    isControlPanelInteractivityAllowed() && !isAnimating && !autoRunActive;
+  if (force || clickable !== plinkoSyncState.controlsClickable) {
+    controlPanel.setRowsSelectState?.(clickable);
+    controlPanel.setDifficultySelectState?.(clickable);
+    plinkoSyncState.controlsClickable = clickable;
+  }
+
+  if (
+    controlPanelMode === "auto" &&
+    !autoRunActive &&
+    isPlinkoGameInstance()
+  ) {
+    const canStart = !isAnimating && !selectionPending;
+    setControlPanelAutoStartState(canStart, { store: true });
+  }
+}
+
 function disableServerRoundSetupControls() {
   setControlPanelBetState(false);
   setControlPanelRandomState(false);
@@ -1142,6 +1246,10 @@ function setAutoRunUIState(active) {
 }
 
 function startAutoRoundIfNeeded() {
+  if (isPlinkoGameInstance()) {
+    return true;
+  }
+
   if (storedAutoSelections.length === 0) {
     return false;
   }
@@ -1158,8 +1266,145 @@ function startAutoRoundIfNeeded() {
   return true;
 }
 
+function stopPlinkoAutoTimer() {
+  if (!autoPlinkoTimer) {
+    return;
+  }
+  clearInterval(autoPlinkoTimer);
+  autoPlinkoTimer = null;
+}
+
+function startPlinkoAutoTimer() {
+  stopPlinkoAutoTimer();
+  autoPlinkoTimer = setInterval(() => {
+    if (!autoRunActive) {
+      return;
+    }
+    if (!autoRunFlag || autoStopShouldComplete) {
+      stopPlinkoAutoTimer();
+      return;
+    }
+    if (Number.isFinite(autoBetsRemaining) && autoBetsRemaining <= 0) {
+      autoRunFlag = false;
+      autoStopShouldComplete = true;
+      autoStopFinishing = true;
+      setAutoRunUIState(true);
+      stopPlinkoAutoTimer();
+      return;
+    }
+    void executePlinkoAutoBetRound({ consumeBetCount: true });
+  }, autoPlinkoIntervalMs);
+}
+
+async function executePlinkoAutoBetRound({ consumeBetCount = false } = {}) {
+  if (!autoRunActive) {
+    return;
+  }
+
+  if (
+    consumeBetCount &&
+    Number.isFinite(autoBetsRemaining) &&
+    autoBetsRemaining <= 0
+  ) {
+    return;
+  }
+
+  autoRoundReadyForNext = false;
+
+  const roundBetAmount = clampToZero(controlPanel?.getBetValue?.());
+  setCurrentAutoRoundBetAmount(roundBetAmount);
+  autoRoundLastStatus = null;
+  autoRoundProfitDelta = 0;
+
+  autoRoundWinPopupHandled = false;
+  autoRoundInProgress = true;
+  clearSelectionDelay();
+  setControlPanelBetState(false);
+  setControlPanelRandomState(false);
+  setControlPanelMinesState(false);
+  setGameBoardInteractivity(false);
+  setControlPanelAutoStartState(true);
+
+  if (consumeBetCount && Number.isFinite(autoBetsRemaining)) {
+    autoBetsRemaining = Math.max(0, autoBetsRemaining - 1);
+    controlPanel?.setNumberOfBetsValue?.(autoBetsRemaining);
+    if (autoBetsRemaining <= 0) {
+      autoRunFlag = false;
+      autoStopShouldComplete = true;
+      autoStopFinishing = true;
+      setAutoRunUIState(true);
+      stopPlinkoAutoTimer();
+    }
+  }
+
+  if (!demoMode && !suppressRelay) {
+    const minesValue = controlPanel?.getMinesValue?.();
+    sendRelayMessage("action:bet", {
+      bet: roundBetAmount,
+      mines: minesValue,
+    });
+
+    try {
+      await submitBet({
+        amount: roundBetAmount,
+        rate: minesValue,
+        gameId: getActiveGameId(),
+        relay: serverRelay,
+      });
+    } catch (error) {
+      if (!handleSessionExpiredError(error)) {
+        console.error("Failed to submit auto bet", error);
+      }
+      autoRoundInProgress = false;
+      if (!sessionExpirationRecoveryTask) {
+        stopAutoBetProcess();
+      }
+      return;
+    }
+  }
+
+  let multiplierValue = null;
+
+  try {
+    autoPlinkoInFlight += 1;
+    autoRoundInProgress = autoPlinkoInFlight > 0;
+    const result = await game?.startRound?.();
+    const rawMultiplier = coerceNumericValue(result?.value ?? result);
+    multiplierValue =
+      rawMultiplier != null && rawMultiplier > 0 ? rawMultiplier : null;
+  } catch (error) {
+    console.error("Failed to run auto round", error);
+  } finally {
+    autoPlinkoInFlight = Math.max(0, autoPlinkoInFlight - 1);
+    autoRoundInProgress = autoPlinkoInFlight > 0;
+  }
+
+  const payout =
+    multiplierValue != null ? roundBetAmount * multiplierValue : 0;
+  const status =
+    multiplierValue != null && multiplierValue >= 1 ? "win" : "lost";
+
+  if (multiplierValue != null) {
+    setTotalProfitMultiplierValue(multiplierValue);
+  }
+
+  recordAutoRoundOutcome({
+    status,
+    winAmount: payout,
+    profitDelta: payout - roundBetAmount,
+    betAmount: roundBetAmount,
+  });
+
+  handleAutoRoundFinished({ skipBetCount: true });
+}
+
 function executeAutoBetRound({ ensurePrepared = true } = {}) {
   if (!autoRunActive) {
+    return;
+  }
+
+  if (isPlinkoGameInstance()) {
+    void executePlinkoAutoBetRound({ consumeBetCount: true });
     return;
   }
 
@@ -1225,7 +1470,11 @@ function executeAutoBetRound({ ensurePrepared = true } = {}) {
         );
 
         updateProfitFromServerState(state);
-        recordAutoRoundOutcome({ status, winAmount: state?.winAmount });
+        recordAutoRoundOutcome({
+          status,
+          winAmount: state?.winAmount,
+          betAmount: autoRoundBetAmount,
+        });
 
         applyAutoResultsFromServer(results, { map: serverMap });
 
@@ -1313,21 +1562,29 @@ function scheduleNextAutoBetRound() {
   }, autoResetDelayMs);
 }
 
-function handleAutoRoundFinished() {
-  autoRoundInProgress = false;
-
-  autoRoundReadyForNext = true;
+function handleAutoRoundFinished({ skipBetCount = false } = {}) {
+  if (isPlinkoGameInstance()) {
+    autoRoundInProgress = autoPlinkoInFlight > 0;
+    autoRoundReadyForNext = false;
+  } else {
+    autoRoundInProgress = false;
+    autoRoundReadyForNext = true;
+  }
 
   if (!autoRunActive) {
     return;
   }
 
-  if (Number.isFinite(autoBetsRemaining)) {
+  if (!skipBetCount && Number.isFinite(autoBetsRemaining)) {
     autoBetsRemaining = Math.max(0, autoBetsRemaining - 1);
     controlPanel?.setNumberOfBetsValue?.(autoBetsRemaining);
   }
 
-  if (Number.isFinite(autoBetsRemaining) && autoBetsRemaining <= 0) {
+  if (
+    !skipBetCount &&
+    Number.isFinite(autoBetsRemaining) &&
+    autoBetsRemaining <= 0
+  ) {
     const shouldSignalCompletion = !autoStopShouldComplete;
     autoRunFlag = false;
     autoStopShouldComplete = true;
@@ -1342,29 +1599,50 @@ function handleAutoRoundFinished() {
     }
   }
 
-  if (!demoMode) {
-    applyAutoAdvancedBetAdjustments();
+  applyAutoAdvancedBetAdjustments();
 
-    if (shouldStopAutoRunForLimits()) {
-      const reason = autoSessionNetProfit >= 0 ? "profit-limit" : "loss-limit";
-      stopAutoRunForLimit(reason);
+  if (shouldStopAutoRunForLimits()) {
+    const reason = autoSessionNetProfit >= 0 ? "profit-limit" : "loss-limit";
+    stopAutoRunForLimit(reason);
+  }
+
+  if (isPlinkoGameInstance()) {
+    const shouldStop =
+      (autoStopShouldComplete || autoStopFinishing) &&
+      autoPlinkoInFlight === 0;
+    if (shouldStop) {
+      const completed =
+        Number.isFinite(autoBetsRemaining) && autoBetsRemaining <= 0;
+      if (completed && !demoMode && !suppressRelay) {
+        sendRelayMessage("action:stop-autobet", {
+          reason: "completed",
+          completed: true,
+        });
+      }
+      autoStopShouldComplete = false;
+      stopAutoBetProcess({ completed });
     }
+    return;
   }
 
   tryScheduleAutoRound();
 }
 
 function beginAutoBetProcess() {
-  if (selectionPending || autoSelectionCount <= 0) {
+  const isPlinko = isPlinkoGameInstance();
+
+  if (!isPlinko && (selectionPending || autoSelectionCount <= 0)) {
     return;
   }
 
-  const selections = game?.getAutoSelections?.() ?? storedAutoSelections;
-  if (!Array.isArray(selections) || selections.length === 0) {
-    return;
-  }
+  if (!isPlinko) {
+    const selections = game?.getAutoSelections?.() ?? storedAutoSelections;
+    if (!Array.isArray(selections) || selections.length === 0) {
+      return;
+    }
 
-  storedAutoSelections = selections.map((selection) => ({ ...selection }));
+    storedAutoSelections = selections.map((selection) => ({ ...selection }));
+  }
 
   const configuredBets = controlPanel?.getNumberOfBetsValue?.();
   if (Number.isFinite(configuredBets) && configuredBets > 0) {
@@ -1390,11 +1668,34 @@ function beginAutoBetProcess() {
       })),
       numberOfBets: Number.isFinite(autoBetsRemaining) ? autoBetsRemaining : 0,
     });
-    sendRelayMessage("control:start-autobet", createAutobetPayload());
-    sendRelayMessage("action:start-autobet", createAutobetPayload());
+    const createPlinkoAutobetPayload = () => ({
+      rows: controlPanel?.getRowsValue?.(),
+      difficulty: controlPanel?.getDifficultyValue?.(),
+      numberOfBets: Number.isFinite(autoBetsRemaining) ? autoBetsRemaining : 0,
+    });
+    const payload = isPlinko
+      ? createPlinkoAutobetPayload()
+      : createAutobetPayload();
+    sendRelayMessage("control:start-autobet", payload);
+    sendRelayMessage("action:start-autobet", payload);
   }
 
   setAutoRunUIState(true);
+  if (isPlinko) {
+    const intervalOverride = Number(
+      opts?.autoPlinkoIntervalMs ?? AUTO_PLINKO_BET_INTERVAL_MS
+    );
+    autoPlinkoIntervalMs =
+      Number.isFinite(intervalOverride) && intervalOverride > 0
+        ? intervalOverride
+        : AUTO_PLINKO_BET_INTERVAL_MS;
+    startPlinkoAutoTimer();
+    void executePlinkoAutoBetRound({ consumeBetCount: true });
+    showAutoBetToast("Auto bet started");
+    return;
+  }
+
+  showAutoBetToast("Auto bet started");
   executeAutoBetRound();
 }
 
@@ -1404,6 +1705,8 @@ function stopAutoBetProcess({ completed = false } = {}) {
     selectionDelayHandle = null;
     selectionPending = false;
   }
+
+  stopPlinkoAutoTimer();
 
   clearTimeout(autoResetTimer);
   autoResetTimer = null;
@@ -1443,6 +1746,9 @@ function stopAutoBetProcess({ completed = false } = {}) {
 
   autoStopFinishing = false;
   setAutoRunUIState(false);
+  if (wasActive) {
+    showAutoBetToast("Auto bet ended");
+  }
 
   if (shouldPreserveSelections && preservedSelections.length > 0) {
     storedAutoSelections = preservedSelections;
@@ -1863,6 +2169,21 @@ function handleCardSelected(selection) {
 function handleAutoSelectionChange(count) {
   autoSelectionCount = count;
 
+  if (isPlinkoGameInstance()) {
+    if (controlPanelMode !== "auto") {
+      setControlPanelAutoStartState(false);
+      return;
+    }
+
+    if (autoRunActive) {
+      setControlPanelAutoStartState(!autoStopFinishing);
+      return;
+    }
+
+    setControlPanelAutoStartState(!selectionPending);
+    return;
+  }
+
   if (controlPanelMode === "auto") {
     const selections = game?.getAutoSelections?.() ?? [];
     if (Array.isArray(selections)) {
@@ -1923,6 +2244,12 @@ function handleStartAutobetClick() {
       autoStopFinishing = true;
       setAutoRunUIState(true);
       sendRelayMessage("action:stop-autobet", { reason: "user" });
+      if (isPlinkoGameInstance()) {
+        stopPlinkoAutoTimer();
+        if (autoPlinkoInFlight === 0) {
+          stopAutoBetProcess({ completed: false });
+        }
+      }
     }
     return;
   }
@@ -1952,6 +2279,7 @@ const opts = {
   grid: 5,
   mines: 5,
   autoResetDelayMs: AUTO_RESET_DELAY_MS,
+  autoPlinkoIntervalMs: AUTO_PLINKO_BET_INTERVAL_MS,
 
   // Visuals
   diamondTexturePath: diamondTextureUrl,
@@ -2050,12 +2378,11 @@ const opts = {
       totalTiles,
       maxMines,
       initialMines,
-      difficulties: ["low", "medium", "high", "scripted"],
+      difficulties: ["low", "medium", "high"],
       difficultyLabels: {
         low: "Low",
         medium: "Medium",
         high: "High",
-        scripted: "Scripted (not random)",
       },
       initialDifficulty: "medium",
     });
@@ -2116,6 +2443,11 @@ const opts = {
       const rows =
         event.detail?.rows ?? event.detail?.value ?? event.detail?.numericValue;
       if (rows == null) return;
+      const state = game?.getState?.();
+      if (state?.isAnimating) {
+        controlPanel?.setRowsValue?.(state.rows, { emit: false });
+        return;
+      }
       pendingRows = rows;
       if (game?.setRows) {
         game.setRows(rows);
@@ -2125,6 +2457,11 @@ const opts = {
     controlPanel.addEventListener("difficultychange", (event) => {
       const difficulty = event.detail?.difficulty ?? event.detail?.value;
       if (!difficulty) return;
+      const state = game?.getState?.();
+      if (state?.isAnimating) {
+        controlPanel?.setDifficultyValue?.(state.difficulty, { emit: false });
+        return;
+      }
       pendingDifficulty = difficulty;
       if (game?.setDifficulty) {
         game.setDifficulty(difficulty);
@@ -2147,6 +2484,7 @@ const opts = {
       sendRelayMessage("control:number-of-bets", {
         value: event.detail?.value,
       });
+      handleAutoSelectionChange(autoSelectionCount);
     });
     controlPanel.addEventListener("strategychange", (event) => {
       sendRelayMessage("control:strategy-mode", {
@@ -2217,6 +2555,13 @@ const opts = {
     gameInitialized = true;
     refreshStoredControlPanelInteractivity();
     window.game = game;
+    syncPlinkoControlPanelState({ force: true });
+    if (plinkoSyncTimer) {
+      clearInterval(plinkoSyncTimer);
+    }
+    plinkoSyncTimer = setInterval(() => {
+      syncPlinkoControlPanelState();
+    }, 120);
 
     autoResetDelayMs = Number(
       game?.getAutoResetDelay?.() ?? AUTO_RESET_DELAY_MS

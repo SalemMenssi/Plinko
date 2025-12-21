@@ -68,6 +68,32 @@ body {
   --app-container-vertical-padding: 32px;
 }
 
+.auto-bet-toast-container {
+  position: fixed;
+  top: 16px;
+  left: 16px;
+  z-index: 9999;
+  pointer-events: none;
+}
+
+.auto-bet-toast {
+  background: rgba(11, 24, 33, 0.92);
+  border: 1px solid #223845;
+  color: #ffffff;
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 0.9rem;
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.35);
+  opacity: 0;
+  transform: translateY(-6px);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.auto-bet-toast.is-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
 @media (max-width: 768px), (orientation: portrait) {
   body {
     --app-body-vertical-padding: 0px;
