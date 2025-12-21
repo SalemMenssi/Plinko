@@ -27,6 +27,8 @@ import tileHoverSoundUrl from "../assets/sounds/TileHover.wav";
 import diamondRevealedSoundUrl from "../assets/sounds/DiamondRevealed.wav";
 import bombRevealedSoundUrl from "../assets/sounds/BombRevealed.wav";
 import winSoundUrl from "../assets/sounds/Win.wav";
+import plinkoSpawnSoundUrl from "../assets/sounds/PlinkoSpawn.ogg";
+import plinkoLandSoundUrl from "../assets/sounds/PlinkoLand.ogg";
 
 /* Build Log */
 const buildId = buildConfig?.buildId ?? "0.0.0";
@@ -2341,6 +2343,10 @@ const opts = {
   winSoundPath: winSoundUrl,
   diamondRevealPitchMin: 1.0,
   diamondRevealPitchMax: 1.25,
+  plinkoSpawnSoundPath: plinkoSpawnSoundUrl,
+  plinkoLandSoundPath: plinkoLandSoundUrl,
+  plinkoSpawnSoundVolume: 0.4,
+  plinkoLandSoundVolume: 0.45,
 
   // Win pop-up
   winPopupShowDuration: 260,

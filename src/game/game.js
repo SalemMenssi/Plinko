@@ -549,6 +549,47 @@ function getMultiplierTextColor() {
   return THEME.textDark;
 }
 
+function createSoundPlayer(
+  url,
+  { volume = 0.35, poolSize = 6, cooldownMs = 20 } = {}
+) {
+  if (!url || typeof Audio === "undefined") {
+    return { play: () => {} };
+  }
+
+  const pool = Array.from({ length: Math.max(1, poolSize) }, () => {
+    const audio = new Audio(url);
+    audio.volume = volume;
+    audio.preload = "auto";
+    return audio;
+  });
+
+  let index = 0;
+  let lastPlayTime = 0;
+
+  return {
+    play: () => {
+      const now = typeof performance !== "undefined" ? performance.now() : Date.now();
+      if (cooldownMs > 0 && now - lastPlayTime < cooldownMs) return;
+      lastPlayTime = now;
+
+      const audio = pool[index];
+      index = (index + 1) % pool.length;
+
+      try {
+        audio.currentTime = 0;
+      } catch {
+        // Ignore seek errors for freshly loaded audio.
+      }
+
+      const result = audio.play();
+      if (result && typeof result.catch === "function") {
+        result.catch(() => {});
+      }
+    },
+  };
+}
+
 function easeOutQuad(t) {
   return 1 - (1 - t) * (1 - t);
 }
@@ -848,6 +889,21 @@ export async function createGame(mount, opts = {}) {
   let isAnimating = false;
   let activeDrops = 0;
   let history = [];
+  const soundEnabled = opts.soundEnabled !== false;
+  const spawnSoundPlayer = soundEnabled
+    ? createSoundPlayer(opts.plinkoSpawnSoundPath ?? opts.ballSpawnSoundPath, {
+        volume: opts.plinkoSpawnSoundVolume ?? 0.8,
+        poolSize: 8,
+        cooldownMs: 20,
+      })
+    : { play: () => {} };
+  const landSoundPlayer = soundEnabled
+    ? createSoundPlayer(opts.plinkoLandSoundPath ?? opts.ballLandSoundPath, {
+        volume: opts.plinkoLandSoundVolume ?? 0.8,
+        poolSize: 8,
+        cooldownMs: 20,
+      })
+    : { play: () => {} };
 
   const markDropStart = () => {
     activeDrops += 1;
@@ -1530,6 +1586,7 @@ export async function createGame(mount, opts = {}) {
 
   async function simulateDrop(targetIndex) {
     return new Promise((resolve) => {
+      spawnSoundPlayer.play();
       const activeBall = createBall();
       activeBall.alpha = 1;
       activeBall.scale.set(1);
@@ -1764,6 +1821,7 @@ export async function createGame(mount, opts = {}) {
           done = true;
           app.ticker.remove(step);
           if (landedIndex >= 0) {
+            landSoundPlayer.play();
             highlightBox(landedIndex);
             destroyBallAndResolve(resolve, landedIndex, activeBall);
           } else {
