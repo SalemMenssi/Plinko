@@ -96,6 +96,30 @@ const THEME = {
   },
 };
 
+const BALL_STYLE_BY_DIFFICULTY = {
+  low: {
+    baseColor: 0xffbf03,
+    glowColor: 0xffe17a,
+    glowAlpha: 0.3,
+    highlightColor: 0xfff3c7,
+    highlightAlpha: 0.35,
+  },
+  medium: {
+    baseColor: 0xff6f03,
+    glowColor: 0xff9a3d,
+    glowAlpha: 0.28,
+    highlightColor: 0xffc38d,
+    highlightAlpha: 0.32,
+  },
+  high: {
+    baseColor: 0xff013e,
+    glowColor: 0xff4b6a,
+    glowAlpha: 0.26,
+    highlightColor: 0xff8aa0,
+    highlightAlpha: 0.3,
+  },
+};
+
 // Physics dials (tuned at constantSpeedBaseRows and scaled per row count).
 const PHYS = {
   gravity: 10000,
@@ -114,11 +138,11 @@ const PHYS = {
   collisionSlop: 0.01,
   impulseJitter: 8,
   // Small steering and randomness for natural-looking paths.
-  aimStrength: 0.00105, // gentle horizontal pull toward a target x (0 disables)
-  centerBiasStrength: 4.0, // nudges vx toward board center after peg hits
-  centerBiasJitter: 0.25, // randomness applied to the center bias strength
-  bounceAngleJitter: 0.02, // random angular wiggle on each peg bounce
-  keepDirectionChance: 0.15, // chance to keep vx direction instead of flipping
+  aimStrength: 0.20105, // 0 off; ~0.0002-0.003 subtle, 0.003-0.01 guided, >0.02 obvious
+  centerBiasStrength: 1.0, // 0 off; ~0.1-0.4 subtle, 0.4-0.8 strong, 1 max
+  centerBiasJitter: 0.15, // 0 steady; ~0.1-0.3 natural, 0.3-0.6 jittery
+  bounceAngleJitter: 0.02, // radians; ~0.01-0.03 subtle, 0.03-0.06 lively
+  keepDirectionChance: 0.15, // 0 always flip; ~0.05-0.2 subtle, 0.2-0.4 streaky
 };
 
 const PHYS_CLAMP_01_KEYS = new Set([
@@ -126,8 +150,14 @@ const PHYS_CLAMP_01_KEYS = new Set([
   "restitution",
   "wallRestitution",
   "tangentialDamp",
+  "keepDirectionChance",
+]);
+
+const PHYS_FORCE_SCALE_KEYS = new Set([
+  "aimStrength",
   "centerBiasStrength",
   "centerBiasJitter",
+  "bounceAngleJitter",
   "keepDirectionChance",
 ]);
 
@@ -312,6 +342,22 @@ function normalizeDifficulty(value) {
   return DIFFICULTY_SCALES[value] ? value : DEFAULT_DIFFICULTY;
 }
 
+function getBallStyle(difficulty) {
+  return (
+    BALL_STYLE_BY_DIFFICULTY[normalizeDifficulty(difficulty)] ?? {
+      baseColor: THEME.ballColor,
+      glowColor: THEME.ballGlowColor,
+      glowAlpha: THEME.ballGlowAlpha,
+      highlightColor: 0xffffff,
+      highlightAlpha: 0.4,
+    }
+  );
+}
+
+function getBallColor(difficulty) {
+  return getBallStyle(difficulty).baseColor;
+}
+
 function formatMultiplierValue(value) {
   if (!Number.isFinite(value)) return 0;
   if (value >= 10) return Math.round(value);
@@ -392,6 +438,7 @@ function getBoxRowWidthScaleForRows(rowCount, layout) {
 
 function getPhysForRows(rowCount) {
   const scale = getSpeedScaleForRows(rowCount);
+  const forceScale = Math.min(2, Math.max(0, scale));
   const scaled = {};
   Object.entries(PHYS).forEach(([key, value]) => {
     if (!Number.isFinite(value)) {
@@ -402,7 +449,8 @@ function getPhysForRows(rowCount) {
       scaled[key] = value;
       return;
     }
-    let next = value * scale;
+    const appliedScale = PHYS_FORCE_SCALE_KEYS.has(key) ? forceScale : scale;
+    let next = value * appliedScale;
     if (PHYS_CLAMP_01_KEYS.has(key)) {
       next = clamp01(next);
     }
@@ -859,6 +907,7 @@ export async function createGame(mount, opts = {}) {
   let boxTexts = [];
   let historyBoxes = [];
   let historyTweens = [];
+  let historyTitle = null;
 
   let gameWidth = 0;
   let gameHeight = 0;
@@ -1198,14 +1247,23 @@ export async function createGame(mount, opts = {}) {
       fontFamily: THEME.multiplierBox.fontFamily,
       fontSize: 12,
       fontWeight: "bold",
-      fill: THEME.ballColor,
+      fill: getBallColor(difficulty),
     });
 
-    const title = new Text("HISTORY", style);
-    title.anchor.set(0.5, 0);
-    title.x = historyPanelX + historyPanelWidth / 2;
-    title.y = historyPanelY - 5;
-    historyContainer.addChild(title);
+    if (historyTitle && !historyTitle.destroyed) {
+      historyTitle.destroy();
+    }
+
+    historyTitle = new Text("HISTORY", style);
+    historyTitle.anchor.set(0.5, 0);
+    historyTitle.x = historyPanelX + historyPanelWidth / 2;
+    historyTitle.y = historyPanelY - 5;
+    historyContainer.addChild(historyTitle);
+  }
+
+  function updateHistoryTitleColor() {
+    if (!historyTitle || historyTitle.destroyed) return;
+    historyTitle.style.fill = getBallColor(difficulty);
   }
 
   function updateHistoryDisplay() {
@@ -1285,16 +1343,17 @@ export async function createGame(mount, opts = {}) {
 
   function createBall() {
     const g = new Graphics();
+    const ballStyle = getBallStyle(difficulty);
 
-    g.beginFill(THEME.ballGlowColor, THEME.ballGlowAlpha);
+    g.beginFill(ballStyle.glowColor, ballStyle.glowAlpha);
     g.drawCircle(0, 0, ballRadius * 1.5);
     g.endFill();
 
-    g.beginFill(THEME.ballColor);
+    g.beginFill(ballStyle.baseColor);
     g.drawCircle(0, 0, ballRadius);
     g.endFill();
 
-    g.beginFill(0xffffff, 0.4);
+    g.beginFill(ballStyle.highlightColor, ballStyle.highlightAlpha);
     g.drawCircle(-ballRadius * 0.3, -ballRadius * 0.3, ballRadius * 0.4);
     g.endFill();
 
@@ -1915,6 +1974,7 @@ export async function createGame(mount, opts = {}) {
       rebuildProbabilities();
       createBoxes();
       updateHistoryDisplay();
+      updateHistoryTitleColor();
     },
 
     setRows(newRows) {
