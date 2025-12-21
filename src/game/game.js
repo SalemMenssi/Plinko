@@ -1,5 +1,6 @@
 import { Application, Container, Graphics, Text, TextStyle } from "pixi.js";
 
+// Visual + layout dials for the board and UI.
 const THEME = {
   background: 0x0a1628,
   pegColor: 0xffffff,
@@ -54,6 +55,7 @@ const THEME = {
   },
   textDark: 0x0a1628,
   layout: {
+    // Board alignment and spacing dials.
     leftPadding: 0,
     rightPadding: 0,
     historyGap: 5,
@@ -63,6 +65,7 @@ const THEME = {
     gridStartYOffset: 0,
     baseWidthScale: 1.2,
     pegOffsetX: 0,
+    // Peg X offset interpolated between min/max rows.
     pegOffsetXMinRows: 8,
     pegOffsetXMaxRows: 16,
     pegOffsetXAtMinRows: -37.5,
@@ -75,13 +78,17 @@ const THEME = {
     boxRowWidthScaleAtMaxRows: 0.9,
     historyOffsetX: 0,
     historyOffsetY: 0,
+    // Spawn origin offsets applied before random range.
     spawnOffsetX: 0,
     spawnOffsetY: 0,
+    // Spawn X range interpolation between min/max rows.
     spawnRangeXMinRows: 16,
     spawnRangeXMaxRows: 8,
     spawnRangeXAtMinRows: 120,
     spawnRangeXAtMaxRows: 60,
+    // If true, spawn origin compensates for peg offset.
     spawnCompensatePegOffset: true,
+    // Extra padding when clamping spawn to box bounds.
     spawnClampPadding: 0,
   },
   pegPattern: {
@@ -89,6 +96,7 @@ const THEME = {
   },
 };
 
+// Physics dials (tuned at constantSpeedBaseRows and scaled per row count).
 const PHYS = {
   gravity: 10000,
   drag: 0.993,
@@ -97,17 +105,20 @@ const PHYS = {
   spawnAngleJitter: 0,
   minSpeed: 300,
   constantSpeed: 300,
+  // Base row count used for scaling physics to different grids.
   constantSpeedBaseRows: 16,
+  // Peg/ball bounce response.
   restitution: 0.18,
   wallRestitution: 0.14,
   tangentialDamp: 0.85,
   collisionSlop: 0.01,
   impulseJitter: 8,
-  aimStrength: 0.00105,
-  centerBiasStrength: 4.0,
-  centerBiasJitter: 0.25,
-  bounceAngleJitter: 0.02,
-  keepDirectionChance: 0.15,
+  // Small steering and randomness for natural-looking paths.
+  aimStrength: 0.00105, // gentle horizontal pull toward a target x (0 disables)
+  centerBiasStrength: 4.0, // nudges vx toward board center after peg hits
+  centerBiasJitter: 0.25, // randomness applied to the center bias strength
+  bounceAngleJitter: 0.02, // random angular wiggle on each peg bounce
+  keepDirectionChance: 0.15, // chance to keep vx direction instead of flipping
 };
 
 const PHYS_CLAMP_01_KEYS = new Set([
@@ -263,6 +274,7 @@ const MULTIPLIER_TABLE_MEDIUM = {
   ],
 };
 
+// Difficulty-specific multiplier values per row (override medium).
 const MULTIPLIER_TABLE_LOW_VALUES = {
   8: [5.6, 2.1, 1.1, 1, 0.5, 1, 1.1, 2.1, 5.6],
   9: [5.6, 2, 1.6, 1, 0.7, 0.7, 1, 1.6, 2, 5.6],
@@ -287,6 +299,7 @@ const MULTIPLIER_TABLE_HIGH_VALUES = {
   16: [16, 9, 2, 1.4, 1.4, 1.2, 1.1, 1, 0.5, 1, 1.1, 1.2, 1.4, 1.4, 2, 9, 16],
 };
 
+// Fallback scalar if a row is missing explicit values.
 const DIFFICULTY_SCALES = {
   low: 0.75,
   medium: 1,
@@ -1350,8 +1363,8 @@ export async function createGame(mount, opts = {}) {
     const speed = Math.hypot(state.vx, state.vy);
     if (speed > maxSpeed) {
       const k = maxSpeed / speed;
-      state.vx *= k;
-      state.vy *= k;
+      state.vx *= k; // scale horizontal velocity to cap speed
+      state.vy *= k; // scale vertical velocity to cap speed
     }
   }
 
@@ -1367,8 +1380,8 @@ export async function createGame(mount, opts = {}) {
     const ny = dy / d;
 
     const penetration = r - d + phys.collisionSlop;
-    state.x += nx * penetration;
-    state.y += ny * penetration;
+    state.x += nx * penetration; // push ball out of peg along normal (x)
+    state.y += ny * penetration; // push ball out of peg along normal (y)
 
     const vDotN = state.vx * nx + state.vy * ny;
     if (vDotN < 0) {
@@ -1382,17 +1395,17 @@ export async function createGame(mount, opts = {}) {
       if (state.y > pegY) {
         j = 0;
       }
-      state.vx += j * nx;
-      state.vy += j * ny;
+      state.vx += j * nx; // apply normal impulse to horizontal velocity
+      state.vy += j * ny; // apply normal impulse to vertical velocity
 
-      state.vx =
+      state.vx = // recompose velocity with tangential damping (x)
         tx * (vDotT * phys.tangentialDamp) +
         nx * (state.vx * nx + state.vy * ny);
-      state.vy =
+      state.vy = // recompose velocity with tangential damping (y)
         ty * (vDotT * phys.tangentialDamp) +
         ny * (state.vx * nx + state.vy * ny);
 
-      state.vx += (Math.random() - 0.5) * phys.impulseJitter;
+      state.vx += (Math.random() - 0.5) * phys.impulseJitter; // random nudge for variety
 
       const angleJitter = Number.isFinite(phys.bounceAngleJitter)
         ? phys.bounceAngleJitter
@@ -1403,8 +1416,8 @@ export async function createGame(mount, opts = {}) {
         const sin = Math.sin(angle);
         const vx = state.vx;
         const vy = state.vy;
-        state.vx = vx * cos - vy * sin;
-        state.vy = vx * sin + vy * cos;
+        state.vx = vx * cos - vy * sin; // rotate velocity vector (x)
+        state.vy = vx * sin + vy * cos; // rotate velocity vector (y)
       }
 
       const keepChance = Number.isFinite(phys.keepDirectionChance)
@@ -1418,14 +1431,14 @@ export async function createGame(mount, opts = {}) {
         }
         const outgoingSign = Math.sign(state.vx);
         if (outgoingSign === 0 || outgoingSign === incomingSign) {
-          state.vx = -state.vx;
+          state.vx = -state.vx; // flip horizontal direction after peg hit
           if (Math.abs(state.vx) < 1e-4) {
             const nudge = Math.max(
               1,
               Math.abs(incomingVx),
               phys.impulseJitter
             );
-            state.vx = -incomingSign * nudge;
+            state.vx = -incomingSign * nudge; // force a clear horizontal push
           }
         }
       }
@@ -1443,12 +1456,12 @@ export async function createGame(mount, opts = {}) {
             const bias = centerBiasStrength * distanceFactor * jitter;
             const movingTowardCenter =
               Math.sign(state.vx) === directionToCenter;
-            state.vx *= movingTowardCenter ? 1 + bias : 1 - bias;
+            state.vx *= movingTowardCenter ? 1 + bias : 1 - bias; // bias x velocity toward center
           }
         }
       }
 
-      clampStateSpeed(state, phys.maxSpeed);
+      clampStateSpeed(state, phys.maxSpeed); // cap speed after collision impulses
 
       spawnRipple(pegX, pegY - pegRadius * 0.2);
       return true;
@@ -1529,7 +1542,7 @@ export async function createGame(mount, opts = {}) {
         targetBox && Number.isFinite(targetBox.x)
           ? targetBox.x + boxWidth / 2
           : null;
-      const spawnX = Math.max(
+      const spawnX = Math.max( // randomize spawn x within bounds
         spawnLeft,
         Math.min(
           spawnRight,
@@ -1547,17 +1560,17 @@ export async function createGame(mount, opts = {}) {
         : 0;
       const spawnAngle =
         Math.PI / 2 + (Math.random() - 0.5) * spawnAngleJitter;
-      const spawnVx = Math.cos(spawnAngle) * spawnSpeed;
-      const spawnVy = Math.sin(spawnAngle) * spawnSpeed;
+      const spawnVx = Math.cos(spawnAngle) * spawnSpeed; // initial horizontal velocity
+      const spawnVy = Math.sin(spawnAngle) * spawnSpeed; // initial vertical velocity
 
       const state = {
-        x: spawnX,
-        y: startPos.y - pegSpacingY * 0.9 + spawnOffsetY,
-        vx: spawnVx,
-        vy: spawnVy,
+        x: spawnX, // initial position x
+        y: startPos.y - pegSpacingY * 0.9 + spawnOffsetY, // initial position y
+        vx: spawnVx, // initial velocity x
+        vy: spawnVy, // initial velocity y
       };
-      activeBall.x = state.x;
-      activeBall.y = state.y;
+      activeBall.x = state.x; // sync visual x to physics
+      activeBall.y = state.y; // sync visual y to physics
 
       let done = false;
 
@@ -1566,37 +1579,37 @@ export async function createGame(mount, opts = {}) {
 
         const dt = Math.min(1 / 30, ticker.deltaMS / 1000);
 
-        state.vy += phys.gravity * dt;
+        state.vy += phys.gravity * dt; // gravity accelerates downward
 
-        state.vx *= Math.pow(phys.drag, dt * 60);
-        state.vy *= Math.pow(phys.drag, dt * 60);
+        state.vx *= Math.pow(phys.drag, dt * 60); // drag dampens horizontal speed
+        state.vy *= Math.pow(phys.drag, dt * 60); // drag dampens vertical speed
 
         if (Number.isFinite(targetX)) {
           const dx = targetX - state.x;
-          state.vx += dx * phys.aimStrength * dt * 60;
+          state.vx += dx * phys.aimStrength * dt * 60; // gentle steering toward target
         }
 
         const speedLimit = Number.isFinite(phys.maxSpeed) ? phys.maxSpeed : 0;
         const sp = Math.hypot(state.vx, state.vy);
         if (speedLimit > 0 && sp > speedLimit) {
           const k = speedLimit / sp;
-          state.vx *= k;
-          state.vy *= k;
+          state.vx *= k; // cap horizontal speed
+          state.vy *= k; // cap vertical speed
         }
 
-        state.x += state.vx * dt;
-        state.y += state.vy * dt;
+        state.x += state.vx * dt; // integrate horizontal position
+        state.y += state.vy * dt; // integrate vertical position
 
         const b = playBounds;
         const left = b.left + ballRadius;
         const right = b.right - ballRadius;
 
         if (state.x < left) {
-          state.x = left;
-          if (state.vx < 0) state.vx = -state.vx * phys.wallRestitution;
+          state.x = left; // clamp to left wall
+          if (state.vx < 0) state.vx = -state.vx * phys.wallRestitution; // bounce off wall
         } else if (state.x > right) {
-          state.x = right;
-          if (state.vx > 0) state.vx = -state.vx * phys.wallRestitution;
+          state.x = right; // clamp to right wall
+          if (state.vx > 0) state.vx = -state.vx * phys.wallRestitution; // bounce off wall
         }
 
         let hit = false;
@@ -1616,19 +1629,19 @@ export async function createGame(mount, opts = {}) {
             maxSpeed > 0 ? Math.min(constantSpeed, maxSpeed) : constantSpeed;
           if (target > 0) {
             if (speed < 1e-4) {
-              state.vx = 0;
-              state.vy = target;
+              state.vx = 0; // avoid NaN when normalizing zero speed
+              state.vy = target; // force downward speed to target
             } else {
               const k = target / speed;
-              state.vx *= k;
-              state.vy *= k;
+              state.vx *= k; // normalize x to constant speed
+              state.vy *= k; // normalize y to constant speed
             }
           }
         } else {
           if (maxSpeed > 0 && speed > maxSpeed) {
             const k = maxSpeed / speed;
-            state.vx *= k;
-            state.vy *= k;
+            state.vx *= k; // cap horizontal speed
+            state.vy *= k; // cap vertical speed
             speed = maxSpeed;
           }
           const floorSpeed =
@@ -1639,20 +1652,20 @@ export async function createGame(mount, opts = {}) {
               : 0;
           if (floorSpeed > 0 && speed < floorSpeed) {
             if (speed < 1e-4) {
-              state.vx = 0;
-              state.vy = floorSpeed;
+              state.vx = 0; // avoid NaN when normalizing zero speed
+              state.vy = floorSpeed; // enforce minimum downward speed
             } else {
               const k = floorSpeed / speed;
-              state.vx *= k;
-              state.vy *= k;
+              state.vx *= k; // normalize x to min speed
+              state.vy *= k; // normalize y to min speed
             }
           }
         }
 
         const squash = 1 + Math.min(0.18, Math.abs(state.vy) / 2400) * 0.12;
         activeBall.scale.set(1 / squash, squash);
-        activeBall.x = state.x;
-        activeBall.y = state.y;
+        activeBall.x = state.x; // sync visual x to physics
+        activeBall.y = state.y; // sync visual y to physics
 
         if (hit && THEME.pinBounce.enabled) {
           const baseY = activeBall.y;
@@ -1663,11 +1676,11 @@ export async function createGame(mount, opts = {}) {
               if (activeBall.destroyed) return;
               const e = easeOutQuad(t);
               const phase = Math.sin(e * Math.PI);
-              activeBall.y = baseY + phase * down;
+              activeBall.y = baseY + phase * down; // visual bounce offset (y)
             },
             complete: () => {
               if (activeBall.destroyed) return;
-              activeBall.y = baseY;
+              activeBall.y = baseY; // restore visual y after bounce
             },
           });
         }
