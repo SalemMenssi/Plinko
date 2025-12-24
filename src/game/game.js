@@ -68,7 +68,7 @@ const THEME = {
     // Peg X offset interpolated between min/max rows.
     pegOffsetXMinRows: 8,
     pegOffsetXMaxRows: 16,
-    pegOffsetXAtMinRows: -37.5,
+    pegOffsetXAtMinRows: -38,
     pegOffsetXAtMaxRows: -20,
     boxOffsetX: 0,
     boxOffsetY: 0,
