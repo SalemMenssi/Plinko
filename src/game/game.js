@@ -96,6 +96,20 @@ const THEME = {
   },
 };
 
+// Test-only deterministic landing (QA only; no payouts when enabled).
+const TEST_MODE = {
+  enabled: true,
+  forcedLandingIndex: 0, // edge offset: 0 = left/right edge, 1 = second from edge
+  label: "TEST MODE: DETERMINISTIC (NO PAYOUT)",
+  fixedDelta: 1 / 60,
+  maxAttempts: 1_000_000,
+  maxSteps: 2000,
+  seedBase: 0x1a2b3c4d,
+  variationsPerSide: 4, // seeds per side (left/right) for visible path variety
+  autoSearch: true,
+  searchYieldMs: 8,
+};
+
 const BALL_STYLE_BY_DIFFICULTY = {
   low: {
     baseColor: 0xffbf03,
@@ -376,6 +390,16 @@ function getSpeedScaleForRows(rowCount) {
 
 function clamp01(value) {
   return Math.max(0, Math.min(1, value));
+}
+
+function createSeededRandom(seed) {
+  let t = seed >>> 0;
+  return () => {
+    t += 0x6d2b79f5;
+    let r = Math.imul(t ^ (t >>> 15), t | 1);
+    r ^= r + Math.imul(r ^ (r >>> 7), r | 61);
+    return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
+  };
 }
 
 function normalizeWinRateValue(value) {
@@ -926,6 +950,34 @@ export async function createGame(mount, opts = {}) {
 
   rebuildProbabilities();
 
+  const now = () =>
+    typeof performance !== "undefined" ? performance.now() : Date.now();
+
+  const getForcedLandingIndex = () => {
+    if (!testMode.enabled) return null;
+    const idx = Number(testMode.forcedLandingIndex);
+    if (!Number.isFinite(idx)) return null;
+    return Math.max(0, Math.min(boxCount - 1, Math.round(idx)));
+  };
+
+  const getTestModeTargets = () => {
+    const offset = getForcedLandingIndex();
+    if (offset == null) return null;
+    const leftIndex = offset;
+    const rightIndex = Math.max(0, boxCount - 1 - offset);
+    return { leftIndex, rightIndex };
+  };
+
+  const getDesiredVariations = () =>
+    Math.max(1, Math.floor(testMode.variationsPerSide ?? 4));
+
+  const getTestModeKey = () => {
+    const targets = getTestModeTargets();
+    if (!targets) return null;
+    const desired = getDesiredVariations();
+    return `${rows}:${targets.leftIndex}:${targets.rightIndex}:${desired}`;
+  };
+
   const app = new Application();
 
   const dpr = window.devicePixelRatio || 1;
@@ -964,6 +1016,15 @@ export async function createGame(mount, opts = {}) {
   let historyBoxes = [];
   let historyTweens = [];
   let historyTitle = null;
+  let testModeLabel = null;
+
+  const testMode = { ...TEST_MODE, ...(opts.testMode ?? {}) };
+  let testModePools = { left: [], right: [] };
+  let testModePoolKey = null;
+  let testModeSearchKey = null;
+  let testModeSearchPromise = null;
+  let testModeSearchToken = 0;
+  let testModeLastSeed = null;
 
   let gameWidth = 0;
   let gameHeight = 0;
@@ -1322,6 +1383,35 @@ export async function createGame(mount, opts = {}) {
     historyTitle.style.fill = getBallColor(difficulty);
   }
 
+  function createTestModeLabel() {
+    if (!testMode.enabled) {
+      if (testModeLabel && !testModeLabel.destroyed) {
+        testModeLabel.destroy();
+      }
+      testModeLabel = null;
+      return;
+    }
+
+    if (testModeLabel && !testModeLabel.destroyed) {
+      testModeLabel.destroy();
+    }
+
+    const style = new TextStyle({
+      fontFamily: THEME.multiplierBox.fontFamily,
+      fontSize: 12,
+      fontWeight: "bold",
+      fill: 0xffc107,
+      align: "center",
+    });
+
+    const labelText = testMode.label || "TEST MODE";
+    testModeLabel = new Text(labelText, style);
+    testModeLabel.anchor.set(0.5, 0);
+    testModeLabel.x = gridWidth / 2;
+    testModeLabel.y = Math.max(6, gridStartY * 0.15);
+    uiContainer.addChild(testModeLabel);
+  }
+
   function updateHistoryDisplay() {
     historyTweens.forEach((cancel) => cancel());
     historyTweens = [];
@@ -1416,6 +1506,218 @@ export async function createGame(mount, opts = {}) {
     return g;
   }
 
+  function buildDropContext(targetIndex, randomFn) {
+    const rand = randomFn ?? Math.random;
+    const startRow = THEME.pegPattern.startRow ?? 0;
+    const startPos = getPegPosition(
+      startRow,
+      0,
+      gridWidth,
+      gridStartY,
+      pegSpacingX,
+      pegSpacingY,
+      pegOffsetX
+    );
+
+    const layout = THEME.layout || {};
+    const spawnCompensate = layout.spawnCompensatePegOffset ?? true;
+    const boxCenterBounds = (() => {
+      if (boxGraphics.length && boxWidth > 0) {
+        const first = boxGraphics[0];
+        const last = boxGraphics[boxGraphics.length - 1];
+        if (first && last) {
+          const left = first.x + boxWidth / 2;
+          const right = last.x + boxWidth / 2;
+          if (right > left) {
+            return { left, right, center: (left + right) / 2, has: true };
+          }
+        }
+      }
+      return {
+        left: ballRadius,
+        right: gridWidth - ballRadius,
+        center: apexX,
+        has: false,
+      };
+    })();
+
+    const spawnOffsetX =
+      (Number.isFinite(layout.spawnOffsetX) ? layout.spawnOffsetX : 0) +
+      (!boxCenterBounds.has && spawnCompensate ? -pegOffsetX : 0);
+    const spawnOffsetY = Number.isFinite(layout.spawnOffsetY)
+      ? layout.spawnOffsetY
+      : 0;
+    const spawnCenterX = boxCenterBounds.center + spawnOffsetX;
+
+    const spawnRangeX = getSpawnRangeXForRows(
+      rows,
+      pegSpacingX,
+      boxWidth,
+      layout
+    );
+    const spawnClampPadding = Number.isFinite(layout.spawnClampPadding)
+      ? layout.spawnClampPadding
+      : 0;
+    const clampPad = Math.max(0, spawnClampPadding);
+    const halfBoxWidth = boxWidth > 0 ? boxWidth / 2 : 0;
+    const boundsLeft = boxCenterBounds.left - halfBoxWidth;
+    const boundsRight = boxCenterBounds.right + halfBoxWidth;
+    const spawnLeft = boundsLeft - clampPad;
+    const spawnRight = boundsRight + clampPad;
+    const playBounds = { left: spawnLeft, right: spawnRight };
+
+    const targetBox =
+      Number.isFinite(targetIndex) && targetIndex >= 0
+        ? boxGraphics[targetIndex]
+        : null;
+    const targetX =
+      targetBox && Number.isFinite(targetBox.x)
+        ? targetBox.x + boxWidth / 2
+        : null;
+
+    const spawnX = Math.max(
+      spawnLeft,
+      Math.min(spawnRight, spawnCenterX + (rand() - 0.5) * spawnRangeX)
+    );
+    const spawnSpeed =
+      Number.isFinite(phys.constantSpeed) && phys.constantSpeed > 0
+        ? phys.constantSpeed
+        : Number.isFinite(phys.spawnSpeed)
+          ? phys.spawnSpeed
+          : 0;
+    const spawnAngleJitter = Number.isFinite(phys.spawnAngleJitter)
+      ? phys.spawnAngleJitter
+      : 0;
+    const spawnAngle = Math.PI / 2 + (rand() - 0.5) * spawnAngleJitter;
+    const spawnVx = Math.cos(spawnAngle) * spawnSpeed;
+    const spawnVy = Math.sin(spawnAngle) * spawnSpeed;
+
+    const state = {
+      x: spawnX,
+      y: startPos.y - pegSpacingY * 0.9 + spawnOffsetY,
+      vx: spawnVx,
+      vy: spawnVy,
+    };
+
+    const boxTop = boxGraphics[0]?.y ?? lastRowY + pegSpacingY;
+    const entryInset = Math.min(
+      boxHeight * 0.45,
+      Math.max(
+        ballRadius * 0.6,
+        boxHeight * (THEME.multiplierBox.entryInsetScale ?? 0.22)
+      )
+    );
+    const entryBottom = Math.max(
+      entryInset + ballRadius,
+      boxHeight * (THEME.multiplierBox.entryBottomScale ?? 0.92)
+    );
+    const zTop = scoreZoneTop || boxTop + entryInset;
+    const zBottom = scoreZoneBottom || boxTop + entryBottom;
+
+    return { state, targetX, playBounds, zTop, zBottom };
+  }
+
+  function stepBallPhysics(
+    state,
+    randomFn,
+    targetX,
+    dt,
+    playBounds,
+    { emitRipple = true } = {}
+  ) {
+    const rand = randomFn ?? Math.random;
+
+    state.vy += phys.gravity * dt;
+
+    state.vx *= Math.pow(phys.drag, dt * 60);
+    state.vy *= Math.pow(phys.drag, dt * 60);
+
+    if (Number.isFinite(targetX)) {
+      const dx = targetX - state.x;
+      state.vx += dx * phys.aimStrength * dt * 60;
+    }
+
+    const speedLimit = Number.isFinite(phys.maxSpeed) ? phys.maxSpeed : 0;
+    const sp = Math.hypot(state.vx, state.vy);
+    if (speedLimit > 0 && sp > speedLimit) {
+      const k = speedLimit / sp;
+      state.vx *= k;
+      state.vy *= k;
+    }
+
+    state.x += state.vx * dt;
+    state.y += state.vy * dt;
+
+    const b = playBounds;
+    const left = b.left + ballRadius;
+    const right = b.right - ballRadius;
+
+    if (state.x < left) {
+      state.x = left;
+      if (state.vx < 0) state.vx = -state.vx * phys.wallRestitution;
+    } else if (state.x > right) {
+      state.x = right;
+      if (state.vx > 0) state.vx = -state.vx * phys.wallRestitution;
+    }
+
+    let hit = false;
+    for (let i = 0; i < pegPoints.length; i++) {
+      if (
+        resolvePegCollision(state, pegPoints[i].x, pegPoints[i].y, rand, {
+          emitRipple,
+        })
+      ) {
+        hit = true;
+      }
+    }
+
+    const maxSpeed = Number.isFinite(phys.maxSpeed) ? phys.maxSpeed : 0;
+    const minSpeed = Number.isFinite(phys.minSpeed) ? phys.minSpeed : 0;
+    const constantSpeed = Number.isFinite(phys.constantSpeed)
+      ? phys.constantSpeed
+      : 0;
+    let speed = Math.hypot(state.vx, state.vy);
+    if (constantSpeed > 0) {
+      const target =
+        maxSpeed > 0 ? Math.min(constantSpeed, maxSpeed) : constantSpeed;
+      if (target > 0) {
+        if (speed < 1e-4) {
+          state.vx = 0;
+          state.vy = target;
+        } else {
+          const k = target / speed;
+          state.vx *= k;
+          state.vy *= k;
+        }
+      }
+    } else {
+      if (maxSpeed > 0 && speed > maxSpeed) {
+        const k = maxSpeed / speed;
+        state.vx *= k;
+        state.vy *= k;
+        speed = maxSpeed;
+      }
+      const floorSpeed =
+        minSpeed > 0
+          ? maxSpeed > 0
+            ? Math.min(minSpeed, maxSpeed)
+            : minSpeed
+          : 0;
+      if (floorSpeed > 0 && speed < floorSpeed) {
+        if (speed < 1e-4) {
+          state.vx = 0;
+          state.vy = floorSpeed;
+        } else {
+          const k = floorSpeed / speed;
+          state.vx *= k;
+          state.vy *= k;
+        }
+      }
+    }
+
+    return hit;
+  }
+
   function getClosestBoxIndexByX(x) {
     if (!boxGraphics.length) return -1;
     let best = 0;
@@ -1429,6 +1731,198 @@ export async function createGame(mount, opts = {}) {
       }
     }
     return best;
+  }
+
+  function simulateDropPreview(targetIndex, randomFn, fixedDelta, maxSteps) {
+    const rand = randomFn ?? Math.random;
+    const { state, targetX, playBounds, zTop, zBottom } = buildDropContext(
+      targetIndex,
+      rand
+    );
+    const steps = Math.max(1, Math.floor(maxSteps ?? 2000));
+    const stepDelta = Number.isFinite(fixedDelta) && fixedDelta > 0
+      ? fixedDelta
+      : 1 / 60;
+
+    for (let step = 0; step < steps; step++) {
+      stepBallPhysics(state, rand, targetX, stepDelta, playBounds, {
+        emitRipple: false,
+      });
+
+      if (state.y >= zTop && state.y <= zBottom) {
+        return getClosestBoxIndexByX(state.x);
+      }
+
+      if (state.y > gameHeight + ballRadius * 3) {
+        break;
+      }
+    }
+
+    return -1;
+  }
+
+  function makeTestSeed(base, rowCount, targetIndex, attempt) {
+    const v =
+      base +
+      rowCount * 0x1f123bb5 +
+      targetIndex * 0x9e3779b9 +
+      attempt * 0x85ebca6b;
+    return v >>> 0;
+  }
+
+  async function findForcedSeedPools(targets) {
+    const desired = getDesiredVariations();
+    const attemptsLimit = Math.max(
+      1,
+      Math.floor(testMode.maxAttempts ?? 1_000_000)
+    );
+    const fixedDelta = Number.isFinite(testMode.fixedDelta)
+      ? testMode.fixedDelta
+      : 1 / 60;
+    const maxSteps = Math.max(1, Math.floor(testMode.maxSteps ?? 2000));
+    const seedBase = Number.isFinite(testMode.seedBase)
+      ? testMode.seedBase
+      : 0x1a2b3c4d;
+    const yieldMs = Math.max(1, Math.floor(testMode.searchYieldMs ?? 8));
+    const token = ++testModeSearchToken;
+
+    const fillPool = async (targetIndex) => {
+      const pool = [];
+      const poolSet = new Set();
+      let attempts = 0;
+      let sliceStart = now();
+
+      while (attempts < attemptsLimit && pool.length < desired) {
+        if (token !== testModeSearchToken) return null;
+        const seed = makeTestSeed(seedBase, rows, targetIndex, attempts);
+        if (!poolSet.has(seed)) {
+          const rand = createSeededRandom(seed);
+          const landedIndex = simulateDropPreview(
+            targetIndex,
+            rand,
+            fixedDelta,
+            maxSteps
+          );
+          if (landedIndex === targetIndex) {
+            pool.push(seed);
+            poolSet.add(seed);
+          }
+        }
+        attempts += 1;
+
+        if (now() - sliceStart >= yieldMs) {
+          await new Promise((resolve) => requestAnimationFrame(resolve));
+          sliceStart = now();
+        }
+      }
+
+      if (pool.length < desired) {
+        console.warn(
+          `Test mode: only ${pool.length}/${desired} variations for box ${targetIndex}`
+        );
+      }
+      return pool;
+    };
+
+    const leftSeeds = await fillPool(targets.leftIndex);
+    if (leftSeeds == null) return null;
+
+    if (targets.leftIndex === targets.rightIndex) {
+      return { left: leftSeeds, right: leftSeeds.slice() };
+    }
+
+    const rightSeeds = await fillPool(targets.rightIndex);
+    if (rightSeeds == null) return null;
+
+    return { left: leftSeeds, right: rightSeeds };
+  }
+
+  function areTestModePoolsReady(targets) {
+    if (!targets) return false;
+    const desired = getDesiredVariations();
+    const leftReady =
+      Array.isArray(testModePools.left) &&
+      testModePools.left.length >= desired;
+    if (targets.leftIndex === targets.rightIndex) {
+      return leftReady;
+    }
+    const rightReady =
+      Array.isArray(testModePools.right) &&
+      testModePools.right.length >= desired;
+    return leftReady && rightReady;
+  }
+
+  function queueTestModeSearch() {
+    if (!testMode.enabled || !testMode.autoSearch) return;
+    const targets = getTestModeTargets();
+    if (!targets) return;
+    const key = getTestModeKey();
+    if (!key) return;
+    if (testModePoolKey === key && areTestModePoolsReady(targets)) return;
+    if (testModeSearchPromise && testModeSearchKey === key) return;
+
+    testModeSearchKey = key;
+    testModePools = { left: [], right: [] };
+    testModePoolKey = null;
+    testModeLastSeed = null;
+
+    testModeSearchPromise = findForcedSeedPools(targets).then((pools) => {
+      if (pools && testModeSearchKey === key) {
+        testModePools = pools;
+        testModePoolKey = key;
+      }
+      testModeSearchPromise = null;
+      return pools;
+    });
+  }
+
+  async function ensureTestModePools() {
+    const targets = getTestModeTargets();
+    const key = getTestModeKey();
+    if (!testMode.enabled || !key || !targets) return null;
+    if (testModePoolKey === key && areTestModePoolsReady(targets)) {
+      return testModePools;
+    }
+    queueTestModeSearch();
+    if (testModeSearchPromise) {
+      await testModeSearchPromise;
+    }
+    return testModePools;
+  }
+
+  function pickTestModeSeed(targets, pools) {
+    if (!targets || !pools) return null;
+    const leftPool = Array.isArray(pools.left) ? pools.left : [];
+    const rightPool = Array.isArray(pools.right) ? pools.right : [];
+
+    let useLeft = true;
+    if (targets.leftIndex !== targets.rightIndex) {
+      if (leftPool.length && rightPool.length) {
+        useLeft = Math.random() < 0.5;
+      } else if (!leftPool.length && rightPool.length) {
+        useLeft = false;
+      } else if (!leftPool.length && !rightPool.length) {
+        return null;
+      }
+    } else if (!leftPool.length) {
+      return null;
+    }
+
+    const pool = useLeft ? leftPool : rightPool;
+    if (!pool.length) return null;
+
+    let index = Math.floor(Math.random() * pool.length);
+    let seed = pool[index];
+    if (pool.length > 1 && seed === testModeLastSeed) {
+      index = (index + 1 + Math.floor(Math.random() * (pool.length - 1))) % pool.length;
+      seed = pool[index];
+    }
+
+    testModeLastSeed = seed;
+    return {
+      seed,
+      targetIndex: useLeft ? targets.leftIndex : targets.rightIndex,
+    };
   }
 
   function highlightBox(boxIndex) {
@@ -1483,7 +1977,14 @@ export async function createGame(mount, opts = {}) {
     }
   }
 
-  function resolvePegCollision(state, pegX, pegY) {
+  function resolvePegCollision(
+    state,
+    pegX,
+    pegY,
+    randomFn,
+    { emitRipple = true } = {}
+  ) {
+    const rand = randomFn ?? Math.random;
     const dx = state.x - pegX;
     const dy = state.y - pegY;
     const r = ballRadius + pegRadius;
@@ -1520,13 +2021,13 @@ export async function createGame(mount, opts = {}) {
         ty * (vDotT * phys.tangentialDamp) +
         ny * (state.vx * nx + state.vy * ny);
 
-      state.vx += (Math.random() - 0.5) * phys.impulseJitter; // random nudge for variety
+      state.vx += (rand() - 0.5) * phys.impulseJitter; // random nudge for variety
 
       const angleJitter = Number.isFinite(phys.bounceAngleJitter)
         ? phys.bounceAngleJitter
         : 0;
       if (angleJitter > 0) {
-        const angle = (Math.random() - 0.5) * angleJitter * 2;
+        const angle = (rand() - 0.5) * angleJitter * 2;
         const cos = Math.cos(angle);
         const sin = Math.sin(angle);
         const vx = state.vx;
@@ -1538,11 +2039,11 @@ export async function createGame(mount, opts = {}) {
       const keepChance = Number.isFinite(phys.keepDirectionChance)
         ? phys.keepDirectionChance
         : 0;
-      const shouldKeep = Math.random() < keepChance;
+      const shouldKeep = rand() < keepChance;
       if (!shouldKeep) {
         let incomingSign = Math.sign(incomingVx);
         if (incomingSign === 0) {
-          incomingSign = Math.random() < 0.5 ? -1 : 1;
+          incomingSign = rand() < 0.5 ? -1 : 1;
         }
         const outgoingSign = Math.sign(state.vx);
         if (outgoingSign === 0 || outgoingSign === incomingSign) {
@@ -1567,7 +2068,7 @@ export async function createGame(mount, opts = {}) {
           const distanceFactor = Math.min(1, Math.abs(toCenter) / maxDistance);
           if (distanceFactor > 0) {
             const jitter =
-              1 + (Math.random() - 0.5) * (phys.centerBiasJitter ?? 0);
+              1 + (rand() - 0.5) * (phys.centerBiasJitter ?? 0);
             const bias = centerBiasStrength * distanceFactor * jitter;
             const movingTowardCenter =
               Math.sign(state.vx) === directionToCenter;
@@ -1578,13 +2079,15 @@ export async function createGame(mount, opts = {}) {
 
       clampStateSpeed(state, phys.maxSpeed); // cap speed after collision impulses
 
-      spawnRipple(pegX, pegY - pegRadius * 0.2);
+      if (emitRipple) {
+        spawnRipple(pegX, pegY - pegRadius * 0.2);
+      }
       return true;
     }
     return false;
   }
 
-  async function simulateDrop(targetIndex) {
+  async function simulateDrop(targetIndex, { randomFn, fixedDelta } = {}) {
     return new Promise((resolve) => {
       spawnSoundPlayer.play();
       const activeBall = createBall();
@@ -1592,189 +2095,89 @@ export async function createGame(mount, opts = {}) {
       activeBall.scale.set(1);
       ballContainer.addChild(activeBall);
 
-      const startRow = THEME.pegPattern.startRow ?? 0;
-      const startPos = getPegPosition(
-        startRow,
-        0,
-        gridWidth,
-        gridStartY,
-        pegSpacingX,
-        pegSpacingY,
-        pegOffsetX
+      const rand = randomFn ?? Math.random;
+      const { state, targetX, playBounds, zTop, zBottom } = buildDropContext(
+        targetIndex,
+        rand
       );
-
-      const layout = THEME.layout || {};
-      const spawnCompensate = layout.spawnCompensatePegOffset ?? true;
-      const boxCenterBounds = (() => {
-        if (boxGraphics.length && boxWidth > 0) {
-          const first = boxGraphics[0];
-          const last = boxGraphics[boxGraphics.length - 1];
-          if (first && last) {
-            const left = first.x + boxWidth / 2;
-            const right = last.x + boxWidth / 2;
-            if (right > left) {
-              return { left, right, center: (left + right) / 2, has: true };
-            }
-          }
-        }
-        return {
-          left: ballRadius,
-          right: gridWidth - ballRadius,
-          center: apexX,
-          has: false,
-        };
-      })();
-
-      const spawnOffsetX =
-        (Number.isFinite(layout.spawnOffsetX) ? layout.spawnOffsetX : 0) +
-        (!boxCenterBounds.has && spawnCompensate ? -pegOffsetX : 0);
-      const spawnOffsetY = Number.isFinite(layout.spawnOffsetY)
-        ? layout.spawnOffsetY
-        : 0;
-      const spawnCenterX = boxCenterBounds.center + spawnOffsetX;
-
-      const spawnRangeX = getSpawnRangeXForRows(
-        rows,
-        pegSpacingX,
-        boxWidth,
-        layout
-      );
-      const spawnClampPadding = Number.isFinite(layout.spawnClampPadding)
-        ? layout.spawnClampPadding
-        : 0;
-      const clampPad = Math.max(0, spawnClampPadding);
-      const halfBoxWidth = boxWidth > 0 ? boxWidth / 2 : 0;
-      const boundsLeft = boxCenterBounds.left - halfBoxWidth;
-      const boundsRight = boxCenterBounds.right + halfBoxWidth;
-      const spawnLeft = boundsLeft - clampPad;
-      const spawnRight = boundsRight + clampPad;
-      const playBounds = { left: spawnLeft, right: spawnRight };
-
-      const targetBox =
-        Number.isFinite(targetIndex) && targetIndex >= 0
-          ? boxGraphics[targetIndex]
-          : null;
-      const targetX =
-        targetBox && Number.isFinite(targetBox.x)
-          ? targetBox.x + boxWidth / 2
-          : null;
-      const spawnX = Math.max( // randomize spawn x within bounds
-        spawnLeft,
-        Math.min(
-          spawnRight,
-          spawnCenterX + (Math.random() - 0.5) * spawnRangeX
-        )
-      );
-      const spawnSpeed =
-        Number.isFinite(phys.constantSpeed) && phys.constantSpeed > 0
-          ? phys.constantSpeed
-          : Number.isFinite(phys.spawnSpeed)
-            ? phys.spawnSpeed
-            : 0;
-      const spawnAngleJitter = Number.isFinite(phys.spawnAngleJitter)
-        ? phys.spawnAngleJitter
-        : 0;
-      const spawnAngle =
-        Math.PI / 2 + (Math.random() - 0.5) * spawnAngleJitter;
-      const spawnVx = Math.cos(spawnAngle) * spawnSpeed; // initial horizontal velocity
-      const spawnVy = Math.sin(spawnAngle) * spawnSpeed; // initial vertical velocity
-
-      const state = {
-        x: spawnX, // initial position x
-        y: startPos.y - pegSpacingY * 0.9 + spawnOffsetY, // initial position y
-        vx: spawnVx, // initial velocity x
-        vy: spawnVy, // initial velocity y
-      };
       activeBall.x = state.x; // sync visual x to physics
       activeBall.y = state.y; // sync visual y to physics
 
       let done = false;
+      let accumulator = 0;
+      const stepSize =
+        Number.isFinite(fixedDelta) && fixedDelta > 0 ? fixedDelta : 0;
+      const useFixed = stepSize > 0;
+      const maxSubSteps = useFixed ? 120 : 1;
 
       const step = (ticker) => {
         if (done) return;
 
-        const dt = Math.min(1 / 30, ticker.deltaMS / 1000);
+        const frameDelta = Math.min(0.1, ticker.deltaMS / 1000);
+        let hitAny = false;
 
-        state.vy += phys.gravity * dt; // gravity accelerates downward
+        if (useFixed) {
+          accumulator = Math.min(accumulator + frameDelta, stepSize * maxSubSteps);
+          let steps = 0;
+          while (accumulator >= stepSize && steps < maxSubSteps && !done) {
+            const hit = stepBallPhysics(
+              state,
+              rand,
+              targetX,
+              stepSize,
+              playBounds,
+              { emitRipple: true }
+            );
+            if (hit) hitAny = true;
+            accumulator -= stepSize;
+            steps += 1;
 
-        state.vx *= Math.pow(phys.drag, dt * 60); // drag dampens horizontal speed
-        state.vy *= Math.pow(phys.drag, dt * 60); // drag dampens vertical speed
+            if (state.y >= zTop && state.y <= zBottom) {
+              const landedIndex = getClosestBoxIndexByX(state.x);
+              done = true;
+              app.ticker.remove(step);
+              if (landedIndex >= 0) {
+                landSoundPlayer.play();
+                highlightBox(landedIndex);
+                destroyBallAndResolve(resolve, landedIndex, activeBall);
+              } else {
+                destroyBallAndResolve(resolve, -1, activeBall);
+              }
+              return;
+            }
 
-        if (Number.isFinite(targetX)) {
-          const dx = targetX - state.x;
-          state.vx += dx * phys.aimStrength * dt * 60; // gentle steering toward target
-        }
-
-        const speedLimit = Number.isFinite(phys.maxSpeed) ? phys.maxSpeed : 0;
-        const sp = Math.hypot(state.vx, state.vy);
-        if (speedLimit > 0 && sp > speedLimit) {
-          const k = speedLimit / sp;
-          state.vx *= k; // cap horizontal speed
-          state.vy *= k; // cap vertical speed
-        }
-
-        state.x += state.vx * dt; // integrate horizontal position
-        state.y += state.vy * dt; // integrate vertical position
-
-        const b = playBounds;
-        const left = b.left + ballRadius;
-        const right = b.right - ballRadius;
-
-        if (state.x < left) {
-          state.x = left; // clamp to left wall
-          if (state.vx < 0) state.vx = -state.vx * phys.wallRestitution; // bounce off wall
-        } else if (state.x > right) {
-          state.x = right; // clamp to right wall
-          if (state.vx > 0) state.vx = -state.vx * phys.wallRestitution; // bounce off wall
-        }
-
-        let hit = false;
-        for (let i = 0; i < pegPoints.length; i++) {
-          if (resolvePegCollision(state, pegPoints[i].x, pegPoints[i].y))
-            hit = true;
-        }
-
-        const maxSpeed = Number.isFinite(phys.maxSpeed) ? phys.maxSpeed : 0;
-        const minSpeed = Number.isFinite(phys.minSpeed) ? phys.minSpeed : 0;
-        const constantSpeed = Number.isFinite(phys.constantSpeed)
-          ? phys.constantSpeed
-          : 0;
-        let speed = Math.hypot(state.vx, state.vy);
-        if (constantSpeed > 0) {
-          const target =
-            maxSpeed > 0 ? Math.min(constantSpeed, maxSpeed) : constantSpeed;
-          if (target > 0) {
-            if (speed < 1e-4) {
-              state.vx = 0; // avoid NaN when normalizing zero speed
-              state.vy = target; // force downward speed to target
-            } else {
-              const k = target / speed;
-              state.vx *= k; // normalize x to constant speed
-              state.vy *= k; // normalize y to constant speed
+            if (state.y > gameHeight + ballRadius * 3) {
+              done = true;
+              app.ticker.remove(step);
+              destroyBallAndResolve(resolve, -1, activeBall);
+              return;
             }
           }
         } else {
-          if (maxSpeed > 0 && speed > maxSpeed) {
-            const k = maxSpeed / speed;
-            state.vx *= k; // cap horizontal speed
-            state.vy *= k; // cap vertical speed
-            speed = maxSpeed;
-          }
-          const floorSpeed =
-            minSpeed > 0
-              ? maxSpeed > 0
-                ? Math.min(minSpeed, maxSpeed)
-                : minSpeed
-              : 0;
-          if (floorSpeed > 0 && speed < floorSpeed) {
-            if (speed < 1e-4) {
-              state.vx = 0; // avoid NaN when normalizing zero speed
-              state.vy = floorSpeed; // enforce minimum downward speed
+          const dt = Math.min(1 / 30, frameDelta);
+          hitAny = stepBallPhysics(state, rand, targetX, dt, playBounds, {
+            emitRipple: true,
+          });
+
+          if (state.y >= zTop && state.y <= zBottom) {
+            const landedIndex = getClosestBoxIndexByX(state.x);
+            done = true;
+            app.ticker.remove(step);
+            if (landedIndex >= 0) {
+              landSoundPlayer.play();
+              highlightBox(landedIndex);
+              destroyBallAndResolve(resolve, landedIndex, activeBall);
             } else {
-              const k = floorSpeed / speed;
-              state.vx *= k; // normalize x to min speed
-              state.vy *= k; // normalize y to min speed
+              destroyBallAndResolve(resolve, -1, activeBall);
             }
+            return;
+          }
+
+          if (state.y > gameHeight + ballRadius * 3) {
+            done = true;
+            app.ticker.remove(step);
+            destroyBallAndResolve(resolve, -1, activeBall);
+            return;
           }
         }
 
@@ -1783,7 +2186,7 @@ export async function createGame(mount, opts = {}) {
         activeBall.x = state.x; // sync visual x to physics
         activeBall.y = state.y; // sync visual y to physics
 
-        if (hit && THEME.pinBounce.enabled) {
+        if (hitAny && THEME.pinBounce.enabled) {
           const baseY = activeBall.y;
           const down = pegRadius * THEME.pinBounce.downOffsetScale;
           tween(app, {
@@ -1799,41 +2202,6 @@ export async function createGame(mount, opts = {}) {
               activeBall.y = baseY; // restore visual y after bounce
             },
           });
-        }
-
-        const boxTop = boxGraphics[0]?.y ?? lastRowY + pegSpacingY;
-        const entryInset = Math.min(
-          boxHeight * 0.45,
-          Math.max(
-            ballRadius * 0.6,
-            boxHeight * (THEME.multiplierBox.entryInsetScale ?? 0.22)
-          )
-        );
-        const entryBottom = Math.max(
-          entryInset + ballRadius,
-          boxHeight * (THEME.multiplierBox.entryBottomScale ?? 0.92)
-        );
-        const zTop = scoreZoneTop || boxTop + entryInset;
-        const zBottom = scoreZoneBottom || boxTop + entryBottom;
-
-        if (state.y >= zTop && state.y <= zBottom) {
-          const landedIndex = getClosestBoxIndexByX(state.x);
-          done = true;
-          app.ticker.remove(step);
-          if (landedIndex >= 0) {
-            landSoundPlayer.play();
-            highlightBox(landedIndex);
-            destroyBallAndResolve(resolve, landedIndex, activeBall);
-          } else {
-            destroyBallAndResolve(resolve, -1, activeBall);
-          }
-          return;
-        }
-
-        if (state.y > gameHeight + ballRadius * 3) {
-          done = true;
-          app.ticker.remove(step);
-          destroyBallAndResolve(resolve, -1, activeBall);
         }
       };
 
@@ -1862,6 +2230,8 @@ export async function createGame(mount, opts = {}) {
     createBoxes();
     createHistoryTitle();
     updateHistoryDisplay();
+    createTestModeLabel();
+    queueTestModeSearch();
   }
 
   function getRtpEstimate() {
@@ -1944,6 +2314,7 @@ export async function createGame(mount, opts = {}) {
 
       try {
         const fullBoxCount = rows + 1;
+        const targets = testMode.enabled ? getTestModeTargets() : null;
 
         let probs = probabilities;
         if (!Array.isArray(probs) || probs.length !== fullBoxCount) {
@@ -1952,12 +2323,36 @@ export async function createGame(mount, opts = {}) {
           probs = probabilities;
         }
 
-        const targetIndex = Math.max(
+        let targetIndex = Math.max(
           0,
           Math.min(selectByProbability(probs), boxCount - 1)
         );
 
-        const landedIndex = await simulateDrop(targetIndex);
+        let randomFn = null;
+        let fixedDelta = null;
+        if (testMode.enabled && targets) {
+          targetIndex = targets.leftIndex;
+          const pools = await ensureTestModePools();
+          const pick = pickTestModeSeed(targets, pools);
+          if (pick) {
+            targetIndex = pick.targetIndex;
+            randomFn = createSeededRandom(pick.seed);
+            fixedDelta = testMode.fixedDelta;
+          } else {
+            console.warn(
+              "Test mode seed search failed; falling back to normal drop."
+            );
+          }
+        }
+
+        const landedIndex = await simulateDrop(targetIndex, {
+          randomFn,
+          fixedDelta,
+        });
+
+        if (testMode.enabled) {
+          return 0;
+        }
 
         if (landedIndex >= 0) {
           const multiplier = multipliers[landedIndex];
@@ -2049,7 +2444,25 @@ export async function createGame(mount, opts = {}) {
       rebuildProbabilities();
       phys = getPhysForRows(rows);
 
+      testModePools = { left: [], right: [] };
+      testModePoolKey = null;
+      testModeSearchKey = null;
+      testModeSearchPromise = null;
+      testModeLastSeed = null;
+
       resize();
+    },
+
+    setTestModeTarget(index) {
+      if (!testMode.enabled) return;
+      testMode.forcedLandingIndex = index;
+      testModePools = { left: [], right: [] };
+      testModePoolKey = null;
+      testModeSearchKey = null;
+      testModeSearchPromise = null;
+      testModeLastSeed = null;
+      createTestModeLabel();
+      queueTestModeSearch();
     },
   };
 }
