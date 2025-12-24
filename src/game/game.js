@@ -1020,6 +1020,7 @@ export async function createGame(mount, opts = {}) {
 
   const testMode = { ...TEST_MODE, ...(opts.testMode ?? {}) };
   let testModePools = { left: [], right: [] };
+  let testModePoolSets = { left: new Set(), right: new Set() };
   let testModePoolKey = null;
   let testModeSearchKey = null;
   let testModeSearchPromise = null;
@@ -1770,7 +1771,7 @@ export async function createGame(mount, opts = {}) {
     return v >>> 0;
   }
 
-  async function findForcedSeedPools(targets) {
+  async function fillTestModePools(targets) {
     const desired = getDesiredVariations();
     const attemptsLimit = Math.max(
       1,
@@ -1785,56 +1786,72 @@ export async function createGame(mount, opts = {}) {
       : 0x1a2b3c4d;
     const yieldMs = Math.max(1, Math.floor(testMode.searchYieldMs ?? 8));
     const token = ++testModeSearchToken;
+    const needRight = targets.leftIndex !== targets.rightIndex;
 
-    const fillPool = async (targetIndex) => {
-      const pool = [];
-      const poolSet = new Set();
-      let attempts = 0;
-      let sliceStart = now();
+    let leftAttempts = 0;
+    let rightAttempts = 0;
+    let sliceStart = now();
 
-      while (attempts < attemptsLimit && pool.length < desired) {
-        if (token !== testModeSearchToken) return null;
-        const seed = makeTestSeed(seedBase, rows, targetIndex, attempts);
-        if (!poolSet.has(seed)) {
-          const rand = createSeededRandom(seed);
-          const landedIndex = simulateDropPreview(
-            targetIndex,
-            rand,
-            fixedDelta,
-            maxSteps
-          );
-          if (landedIndex === targetIndex) {
-            pool.push(seed);
-            poolSet.add(seed);
-          }
-        }
-        attempts += 1;
-
-        if (now() - sliceStart >= yieldMs) {
-          await new Promise((resolve) => requestAnimationFrame(resolve));
-          sliceStart = now();
-        }
+    const tryAddSeed = (side, targetIndex, attempt) => {
+      if (token !== testModeSearchToken) return false;
+      const seed = makeTestSeed(seedBase, rows, targetIndex, attempt);
+      if (testModePoolSets[side].has(seed)) return false;
+      const rand = createSeededRandom(seed);
+      const landedIndex = simulateDropPreview(
+        targetIndex,
+        rand,
+        fixedDelta,
+        maxSteps
+      );
+      if (landedIndex === targetIndex) {
+        if (token !== testModeSearchToken) return false;
+        testModePoolSets[side].add(seed);
+        testModePools[side].push(seed);
+        return true;
       }
-
-      if (pool.length < desired) {
-        console.warn(
-          `Test mode: only ${pool.length}/${desired} variations for box ${targetIndex}`
-        );
-      }
-      return pool;
+      return false;
     };
 
-    const leftSeeds = await fillPool(targets.leftIndex);
-    if (leftSeeds == null) return null;
+    while (true) {
+      if (token !== testModeSearchToken) return null;
 
-    if (targets.leftIndex === targets.rightIndex) {
-      return { left: leftSeeds, right: leftSeeds.slice() };
+      const leftDone =
+        testModePools.left.length >= desired || leftAttempts >= attemptsLimit;
+      const rightDone =
+        !needRight ||
+        testModePools.right.length >= desired ||
+        rightAttempts >= attemptsLimit;
+
+      if (leftDone && rightDone) break;
+
+      if (!leftDone) {
+        tryAddSeed("left", targets.leftIndex, leftAttempts);
+        leftAttempts += 1;
+      }
+
+      if (!rightDone) {
+        tryAddSeed("right", targets.rightIndex, rightAttempts);
+        rightAttempts += 1;
+      }
+
+      if (now() - sliceStart >= yieldMs) {
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+        sliceStart = now();
+      }
     }
 
-    const rightSeeds = await fillPool(targets.rightIndex);
-    if (rightSeeds == null) return null;
+    if (testModePools.left.length < desired) {
+      console.warn(
+        `Test mode: only ${testModePools.left.length}/${desired} variations for box ${targets.leftIndex}`
+      );
+    }
+    if (needRight && testModePools.right.length < desired) {
+      console.warn(
+        `Test mode: only ${testModePools.right.length}/${desired} variations for box ${targets.rightIndex}`
+      );
+    }
 
-    return { left: leftSeeds, right: rightSeeds };
+    return testModePools;
   }
 
   function areTestModePoolsReady(targets) {
@@ -1852,42 +1869,61 @@ export async function createGame(mount, opts = {}) {
     return leftReady && rightReady;
   }
 
+  function hasAnyTestModeSeed(targets) {
+    if (!targets) return false;
+    if (testModePools.left.length) return true;
+    if (targets.leftIndex === targets.rightIndex) return false;
+    return testModePools.right.length > 0;
+  }
+
   function queueTestModeSearch() {
     if (!testMode.enabled || !testMode.autoSearch) return;
     const targets = getTestModeTargets();
     if (!targets) return;
     const key = getTestModeKey();
     if (!key) return;
-    if (testModePoolKey === key && areTestModePoolsReady(targets)) return;
+    if (testModePoolKey !== key) {
+      testModePools = { left: [], right: [] };
+      testModePoolSets = { left: new Set(), right: new Set() };
+      testModePoolKey = key;
+      testModeLastSeed = null;
+    }
+    if (areTestModePoolsReady(targets)) return;
     if (testModeSearchPromise && testModeSearchKey === key) return;
 
     testModeSearchKey = key;
-    testModePools = { left: [], right: [] };
-    testModePoolKey = null;
-    testModeLastSeed = null;
 
-    testModeSearchPromise = findForcedSeedPools(targets).then((pools) => {
-      if (pools && testModeSearchKey === key) {
-        testModePools = pools;
-        testModePoolKey = key;
+    testModeSearchPromise = fillTestModePools(targets).then((pools) => {
+      if (testModeSearchKey === key) {
+        testModeSearchKey = null;
       }
       testModeSearchPromise = null;
       return pools;
     });
   }
 
-  async function ensureTestModePools() {
-    const targets = getTestModeTargets();
+  async function ensureTestModeSeed(targets) {
+    if (!testMode.enabled || !targets) return false;
     const key = getTestModeKey();
-    if (!testMode.enabled || !key || !targets) return null;
-    if (testModePoolKey === key && areTestModePoolsReady(targets)) {
-      return testModePools;
-    }
+    if (!key) return false;
+
     queueTestModeSearch();
-    if (testModeSearchPromise) {
-      await testModeSearchPromise;
-    }
-    return testModePools;
+
+    if (hasAnyTestModeSeed(targets)) return true;
+    if (!testModeSearchPromise) return false;
+
+    await new Promise((resolve) => {
+      const check = () => {
+        if (!testMode.enabled) return resolve();
+        if (testModePoolKey !== key) return resolve();
+        if (hasAnyTestModeSeed(targets)) return resolve();
+        if (!testModeSearchPromise) return resolve();
+        requestAnimationFrame(check);
+      };
+      check();
+    });
+
+    return hasAnyTestModeSeed(targets);
   }
 
   function pickTestModeSeed(targets, pools) {
@@ -2332,8 +2368,8 @@ export async function createGame(mount, opts = {}) {
         let fixedDelta = null;
         if (testMode.enabled && targets) {
           targetIndex = targets.leftIndex;
-          const pools = await ensureTestModePools();
-          const pick = pickTestModeSeed(targets, pools);
+          await ensureTestModeSeed(targets);
+          const pick = pickTestModeSeed(targets, testModePools);
           if (pick) {
             targetIndex = pick.targetIndex;
             randomFn = createSeededRandom(pick.seed);
@@ -2444,7 +2480,9 @@ export async function createGame(mount, opts = {}) {
       rebuildProbabilities();
       phys = getPhysForRows(rows);
 
+      testModeSearchToken += 1;
       testModePools = { left: [], right: [] };
+      testModePoolSets = { left: new Set(), right: new Set() };
       testModePoolKey = null;
       testModeSearchKey = null;
       testModeSearchPromise = null;
@@ -2456,7 +2494,9 @@ export async function createGame(mount, opts = {}) {
     setTestModeTarget(index) {
       if (!testMode.enabled) return;
       testMode.forcedLandingIndex = index;
+      testModeSearchToken += 1;
       testModePools = { left: [], right: [] };
+      testModePoolSets = { left: new Set(), right: new Set() };
       testModePoolKey = null;
       testModeSearchKey = null;
       testModeSearchPromise = null;
