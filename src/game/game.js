@@ -2539,18 +2539,19 @@ activeBall.scale.set(base / squash, base * squash);
           fixedDelta,
         });
 
-        if (testMode.enabled) {
-          return 0;
-        }
+        
 
         if (landedIndex >= 0) {
           const multiplier = multipliers[landedIndex];
           history.unshift(multiplier);
           if (history.length > historySize) history.length = historySize;
           updateHistoryDisplay();
+          if (testMode.enabled) {
+          return 0;
+        }
           return multiplier;
         }
-
+        
         return -1;
       } finally {
         markDropEnd();
