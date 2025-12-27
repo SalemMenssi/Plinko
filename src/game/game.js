@@ -1,8 +1,46 @@
-import { Application, Container, Graphics, Text, TextStyle } from "pixi.js";
+import {
+  Application,
+  Container,
+  Sprite,
+  Graphics,
+  Text,
+  TextStyle,
+  NineSlicePlane,
+  Assets,
+  Texture,
+} from "pixi.js";
+
+// Sprite assets are imported so bundlers (Vite/Webpack/CRA) can serve them correctly.
+import boxWhiteTextureUrl from "../../assets/sprites/box_white.png";
+import ballWhiteTextureUrl from "../../assets/sprites/ball_white.png";
+// If you later add a peg sprite, uncomment and provide the file:
+// import pegWhiteTextureUrl from "../../assets/sprites/peg_white.png";
+
+const DEFAULT_SPRITES = {
+  // Put your new sprites here (as you showed in your folder screenshot).
+  peg: null,
+  ball: ballWhiteTextureUrl,
+  box: boxWhiteTextureUrl,
+  // optional shadow sprite (leave null to auto-generate a simple shadow)
+  shadow: null,
+  // if true, we tint the white sprites (boxes + ball) to match multiplier colors
+  useTint: true,
+};
+
+function resolveSprites(opts = {}) {
+  return {
+    peg: opts.pegTexture ?? DEFAULT_SPRITES.peg,
+    ball: opts.ballTexture ?? DEFAULT_SPRITES.ball,
+    box: opts.boxTexture ?? DEFAULT_SPRITES.box,
+    shadow: opts.boxShadowTexture ?? DEFAULT_SPRITES.shadow,
+    useTint: opts.useTint !== false,
+  };
+}
+
 
 // Visual + layout dials for the board and UI.
 const THEME = {
-  background: 0x0a1628,
+  background: 0x091b26,
   pegColor: 0xffffff,
   pegGlowColor: 0x4a5568,
   pegGlowAlpha: 0.22,
@@ -96,16 +134,17 @@ const THEME = {
   },
 };
 
-// Test-only deterministic landing (QA only; no payouts when enabled).
+
 const TEST_MODE = {
   enabled: true,
-  forcedLandingIndex: 0, // edge offset: 0 = left/right edge, 1 = second from edge
+  forcedLandingIndex: 1, // edge offset: 0 = left/right edge, 1 = second from edge
   label: "TEST MODE: DETERMINISTIC (NO PAYOUT)",
+  showLabel: false,  
   fixedDelta: 1 / 60,
   maxAttempts: 1_000_000,
   maxSteps: 2000,
   seedBase: 0x1a2b3c4d,
-  variationsPerSide: 4, // seeds per side (left/right) for visible path variety
+  variationsPerSide: 4, 
   autoSearch: true,
   searchYieldMs: 8,
 };
@@ -893,6 +932,15 @@ export async function createGame(mount, opts = {}) {
   const minRows = opts.minRows ?? 8;
   const maxRows = opts.maxRows ?? 16;
 
+  // Sprites (white sprites tinted in-game)
+  const SPRITES = resolveSprites(opts);
+
+  // Loaded textures
+  let texPeg = null;
+  let texBall = null;
+  let texBox = null;
+  let texBoxShadow = null;
+
   let rows = opts.rows ?? 16;
   rows = Math.max(minRows, Math.min(maxRows, rows));
 
@@ -996,6 +1044,44 @@ export async function createGame(mount, opts = {}) {
   root.innerHTML = "";
   root.appendChild(app.canvas);
 
+
+  // Load textures once (safe if you keep these files under /public/assets/...)
+  // IMPORTANT: make sure these paths exist:
+  //  - public/assets/sprites/box_white.png
+  //  - public/assets/sprites/ballwhaite.png
+  //  - (optional) public/assets/sprites/peg.png
+  try {
+    texBox = await Assets.load(SPRITES.box);
+  } catch (e) {
+    console.warn("Failed to load box sprite:", SPRITES.box, e);
+    texBox = Texture.WHITE;
+  }
+
+  try {
+    texBall = await Assets.load(SPRITES.ball);
+  } catch (e) {
+    console.warn("Failed to load ball sprite:", SPRITES.ball, e);
+    texBall = Texture.WHITE;
+  }
+
+  try {
+    texPeg = await Assets.load(SPRITES.peg);
+  } catch (e) {
+    console.warn("Failed to load peg sprite:", SPRITES.peg, e);
+    texPeg = null;
+  }
+
+  if (SPRITES.shadow) {
+    try {
+      texBoxShadow = await Assets.load(SPRITES.shadow);
+    } catch (e) {
+      console.warn("Failed to load box shadow sprite:", SPRITES.shadow, e);
+      texBoxShadow = null;
+    }
+  } else {
+    texBoxShadow = null;
+  }
+
   const mainContainer = new Container();
   const boardContainer = new Container();
   const effectsContainer = new Container();
@@ -1019,6 +1105,7 @@ export async function createGame(mount, opts = {}) {
   let testModeLabel = null;
 
   const testMode = { ...TEST_MODE, ...(opts.testMode ?? {}) };
+  const defaultSearchYieldMs = Math.max(1, Math.floor(testMode.searchYieldMs ?? 8));
   let testModePools = { left: [], right: [] };
   let testModePoolSets = { left: new Set(), right: new Set() };
   let testModePoolKey = null;
@@ -1181,15 +1268,25 @@ export async function createGame(mount, opts = {}) {
           pegOffsetX
         );
 
-        const peg = new Graphics();
+        let peg;
 
-        peg.beginFill(THEME.pegGlowColor, THEME.pegGlowAlpha);
-        peg.drawCircle(0, 0, pegRadius * THEME.pegGlowScale);
-        peg.endFill();
-
-        peg.beginFill(THEME.pegColor);
-        peg.drawCircle(0, 0, pegRadius);
-        peg.endFill();
+        // Sprite peg if available, otherwise fallback to Graphics circle.
+        if (texPeg) {
+          peg = new Sprite(texPeg);
+          peg.anchor.set(0.5);
+          const target = pegRadius * 2;
+          const w = peg.texture?.width || target;
+          const h = peg.texture?.height || target;
+          const scale = target / Math.max(1, Math.max(w, h));
+          peg.scale.set(scale);
+          // keep peg white; tint only if you want:
+          // peg.tint = THEME.pegColor;
+        } else {
+          peg = new Graphics();
+          peg.beginFill(THEME.pegColor);
+          peg.drawCircle(0, 0, pegRadius);
+          peg.endFill();
+        }
 
         peg.x = pos.x;
         peg.y = pos.y;
@@ -1201,7 +1298,7 @@ export async function createGame(mount, opts = {}) {
     }
   }
 
-  function drawButtonBox(g, w, h, color) {
+function drawButtonBox(g, w, h, color) {
     const r = THEME.multiplierBox.cornerRadius;
     const depth = THEME.multiplierBox.pressDepth;
 
@@ -1291,16 +1388,40 @@ export async function createGame(mount, opts = {}) {
       if (x < baseLeft - 1) continue; // Prevent out-of-bounds placement
       if (x + w > baseRight + 1) continue;
 
-      // Create the box graphic
-      const box = new Graphics();
-      drawButtonBox(box, w, h, color);
-      box.x = x;
-      box.y = boxY;
+      // Create the box (sprite-based)
+      const wrap = new Container();
+
+      // shadow (simple auto shadow if you don't provide a separate texture)
+      let shadow;
+      if (texBoxShadow) {
+        shadow = new Sprite(texBoxShadow);
+        if (SPRITES.useTint) shadow.tint = 0x000000;
+        shadow.alpha = THEME.multiplierBox.shadowAlpha;
+      } else {
+        shadow = new Sprite(texBox);
+        shadow.tint = 0x000000;
+        shadow.alpha = THEME.multiplierBox.shadowAlpha;
+      }
+      shadow.anchor.set(0, 0);
+      shadow.width = w;
+      shadow.height = h;
+      shadow.y = THEME.multiplierBox.pressDepth;
+
+      const face = new Sprite(texBox);
+      face.anchor.set(0, 0);
+      face.width = w;
+      face.height = h;
+      if (SPRITES.useTint) face.tint = color;
+
+      wrap.addChild(shadow);
+      wrap.addChild(face);
+
+      wrap.x = x;
+      wrap.y = boxY;
 
       // Add the box to the container
-      boxesContainer.addChild(box);
-      boxGraphics.push(box);
-
+      boxesContainer.addChild(wrap);
+      boxGraphics.push(wrap);
       // Adjust font size for text based on box size
       const fontSize = Math.max(
         6,
@@ -1349,8 +1470,7 @@ export async function createGame(mount, opts = {}) {
       update: (t) => {
         if (!ballToDestroy || ballToDestroy.destroyed) return;
         ballToDestroy.alpha = 1 - t;
-        ballToDestroy.scale.set(1 - t * 0.35);
-      },
+},
       complete: () => {
         if (ballToDestroy && !ballToDestroy.destroyed) {
           ballToDestroy.destroy();
@@ -1385,10 +1505,8 @@ export async function createGame(mount, opts = {}) {
   }
 
   function createTestModeLabel() {
-    if (!testMode.enabled) {
-      if (testModeLabel && !testModeLabel.destroyed) {
-        testModeLabel.destroy();
-      }
+    if (!testMode.enabled || testMode.showLabel === false) {
+      if (testModeLabel && !testModeLabel.destroyed) testModeLabel.destroy();
       testModeLabel = null;
       return;
     }
@@ -1489,23 +1607,25 @@ export async function createGame(mount, opts = {}) {
   }
 
   function createBall() {
-    const g = new Graphics();
-    const ballStyle = getBallStyle(difficulty);
+  const ballStyle = getBallStyle(difficulty);
 
-    g.beginFill(ballStyle.glowColor, ballStyle.glowAlpha);
-    g.drawCircle(0, 0, ballRadius * 1.5);
-    g.endFill();
+  const s = new Sprite(texBall);
+  s.anchor.set(0.5);
 
-    g.beginFill(ballStyle.baseColor);
-    g.drawCircle(0, 0, ballRadius);
-    g.endFill();
+  // Keep EXACT same size as before
+ const target = ballRadius * 2;
+const w = s.texture?.width || target;
+const h = s.texture?.height || target;
+const baseScale = target / Math.max(1, Math.max(w, h));
 
-    g.beginFill(ballStyle.highlightColor, ballStyle.highlightAlpha);
-    g.drawCircle(-ballRadius * 0.3, -ballRadius * 0.3, ballRadius * 0.4);
-    g.endFill();
+s.__baseScale = baseScale;       // ✅ store
+s.scale.set(baseScale);
+  // tint (white sprite -> colored in game)
+  s.tint = ballStyle.baseColor;
 
-    return g;
-  }
+  return s;
+}
+
 
   function buildDropContext(targetIndex, randomFn) {
     const rand = randomFn ?? Math.random;
@@ -1773,18 +1893,17 @@ export async function createGame(mount, opts = {}) {
 
   async function fillTestModePools(targets) {
     const desired = getDesiredVariations();
-    const attemptsLimit = Math.max(
-      1,
-      Math.floor(testMode.maxAttempts ?? 1_000_000)
-    );
+    const rawAttemptsLimit = Math.max(1, Math.floor(testMode.maxAttempts ?? 1_000_000));
+    const attemptsLimit = Math.min(rawAttemptsLimit, desired * 25000);
     const fixedDelta = Number.isFinite(testMode.fixedDelta)
       ? testMode.fixedDelta
       : 1 / 60;
     const maxSteps = Math.max(1, Math.floor(testMode.maxSteps ?? 2000));
+    const searchMaxSteps = Math.min(maxSteps, Math.max(700, rows * 110));
     const seedBase = Number.isFinite(testMode.seedBase)
       ? testMode.seedBase
       : 0x1a2b3c4d;
-    const yieldMs = Math.max(1, Math.floor(testMode.searchYieldMs ?? 8));
+    const yieldMs = Math.max(8, Math.floor(testMode.searchYieldMs ?? 16));
     const token = ++testModeSearchToken;
     const needRight = targets.leftIndex !== targets.rightIndex;
 
@@ -1797,12 +1916,8 @@ export async function createGame(mount, opts = {}) {
       const seed = makeTestSeed(seedBase, rows, targetIndex, attempt);
       if (testModePoolSets[side].has(seed)) return false;
       const rand = createSeededRandom(seed);
-      const landedIndex = simulateDropPreview(
-        targetIndex,
-        rand,
-        fixedDelta,
-        maxSteps
-      );
+      const landedIndex = simulateDropPreview(targetIndex, rand, fixedDelta, searchMaxSteps);
+
       if (landedIndex === targetIndex) {
         if (token !== testModeSearchToken) return false;
         testModePoolSets[side].add(seed);
@@ -1961,26 +2076,61 @@ export async function createGame(mount, opts = {}) {
     };
   }
 
-  function highlightBox(boxIndex) {
-    const box = boxGraphics[boxIndex];
-    const text = boxTexts[boxIndex];
-    if (!box || !text || box.destroyed || text.destroyed) return;
+  
+function highlightBox(boxIndex) {
+  const box = boxGraphics[boxIndex];
+  const text = boxTexts[boxIndex];
 
-    tween(app, {
-      duration: 160,
-      update: (t) => {
-        if (box.destroyed || text.destroyed) return;
-        const s = 1 + Math.sin(t * Math.PI) * 0.22;
-        box.scale.set(s);
-        text.scale.set(s);
-      },
-      complete: () => {
-        if (box.destroyed || text.destroyed) return;
-        box.scale.set(1);
-        text.scale.set(1);
-      },
-    });
+  if (!box || !text || box.destroyed || text.destroyed) return;
+
+  const depth = Math.max(2, Number(THEME.multiplierBox.pressDepth ?? 5));
+
+  // --- stable baseline (never drift) ---
+  const y0 = box.__baseY ?? box.y;
+  const ty0 = text.__baseY ?? text.y;
+  box.__baseY = y0;
+  text.__baseY = ty0;
+
+  // --- cancel any in-flight press animation ---
+  if (box.__pressCancel) {
+    box.__pressCancel();
+    box.__pressCancel = null;
   }
+
+  // --- press DOWN ---
+  const cancelDown = tween(app, {
+    duration: 80,
+    update: (t) => {
+      if (box.destroyed || text.destroyed) return;
+      const e = easeOutQuad(t);
+      box.y = y0 + depth * e;
+      text.y = ty0 + depth * e;
+    },
+    complete: () => {
+      // --- press UP ---
+      const cancelUp = tween(app, {
+        duration: 120,
+        update: (t) => {
+          if (box.destroyed || text.destroyed) return;
+          const e = easeOutQuad(t);
+          box.y = y0 + depth * (1 - e);
+          text.y = ty0 + depth * (1 - e);
+        },
+        complete: () => {
+          // snap-safe restore
+          if (!box.destroyed) box.y = y0;
+          if (!text.destroyed) text.y = ty0;
+          box.__pressCancel = null;
+        },
+      });
+
+      box.__pressCancel = cancelUp;
+    },
+  });
+
+  box.__pressCancel = cancelDown;
+}
+
 
   function destroyBallAndResolve(resolve, value, ballToDestroy) {
     if (!ballToDestroy) {
@@ -1992,8 +2142,7 @@ export async function createGame(mount, opts = {}) {
       update: (t) => {
         if (!ballToDestroy) return;
         ballToDestroy.alpha = 1 - t;
-        ballToDestroy.scale.set(1 - t * 0.35);
-      },
+},
       complete: () => {
         if (ballToDestroy) {
           ballToDestroy.destroy();
@@ -2128,7 +2277,9 @@ export async function createGame(mount, opts = {}) {
       spawnSoundPlayer.play();
       const activeBall = createBall();
       activeBall.alpha = 1;
-      activeBall.scale.set(1);
+      // activeBall.scale.set(1);
+      activeBall.scale.set(activeBall.__baseScale ?? 1);
+
       ballContainer.addChild(activeBall);
 
       const rand = randomFn ?? Math.random;
@@ -2218,7 +2369,9 @@ export async function createGame(mount, opts = {}) {
         }
 
         const squash = 1 + Math.min(0.18, Math.abs(state.vy) / 2400) * 0.12;
-        activeBall.scale.set(1 / squash, squash);
+        // activeBall.scale.set(1 / squash, squash);
+        const base = activeBall.__baseScale ?? 1;
+activeBall.scale.set(base / squash, base * squash);
         activeBall.x = state.x; // sync visual x to physics
         activeBall.y = state.y; // sync visual y to physics
 
@@ -2487,6 +2640,8 @@ export async function createGame(mount, opts = {}) {
       testModeSearchKey = null;
       testModeSearchPromise = null;
       testModeLastSeed = null;
+
+      testMode.searchYieldMs = defaultSearchYieldMs;  
 
       resize();
     },
