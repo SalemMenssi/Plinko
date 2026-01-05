@@ -137,7 +137,7 @@ const THEME = {
 
 const TEST_MODE = {
   enabled: true,
-  forcedLandingIndex: 1, // edge offset: 0 = left/right edge, 1 = second from edge
+  forcedLandingIndex: 2, // edge offset: 0 = left/right edge, 1 = second from edge
   label: "TEST MODE: DETERMINISTIC (NO PAYOUT)",
   showLabel: false,  
   fixedDelta: 1 / 60,
@@ -1143,55 +1143,82 @@ export async function createGame(mount, opts = {}) {
     return row >= (THEME.pegPattern.startRow ?? 0);
   }
 
-  function calculateLayout() {
-    const containerWidth = Math.max(1, root.clientWidth || 500);
-    const containerHeight = Math.max(1, root.clientHeight || 500);
+function calculateLayout() {
+  const containerWidth = Math.max(1, root.clientWidth || 500);
+  const containerHeight = Math.max(1, root.clientHeight || 500);
 
-    const layout = THEME.layout || {};
-    const leftPadding = layout.leftPadding ?? 0;
-    const rightPadding = layout.rightPadding ?? 0;
-    const historyGap = layout.historyGap ?? 5;
-    pegOffsetX = getPegOffsetXForRows(rows);
+  const layout = THEME.layout || {};
+  const leftPadding = layout.leftPadding ?? 0;
+  const rightPadding = layout.rightPadding ?? 0;
+  const historyGap = layout.historyGap ?? 5;
 
-    historyPanelWidth = Math.min(110, containerWidth * 0.16);
-    const playAreaWidth = Math.max(
-      1,
-      containerWidth - historyPanelWidth - historyGap - leftPadding - rightPadding
-    );
+  const smallScreen = containerWidth <= 520;
+  const showHistory = opts?.showHistory !== false;
 
-    gameWidth = playAreaWidth;
-    gameHeight = containerHeight;
+  pegOffsetX = smallScreen ? 0 : getPegOffsetXForRows(rows);
 
-    const maxPegsInRow = rows + 1;
+  const reservedHistoryWidth = showHistory
+    ? smallScreen
+      ? Math.min(64, containerWidth * 0.18)
+      : Math.min(110, containerWidth * 0.16)
+    : 0;
 
-    gridStartY =
-      gameHeight * (layout.gridStartYScale ?? 0.055) +
-      (layout.gridStartYOffset ?? 0);
-    gridWidth = gameWidth;
+  historyPanelWidth = reservedHistoryWidth;
 
-    const bottomReserve = gameHeight * 0.14;
-    const usableH = gameHeight - gridStartY - bottomReserve;
+  const playAreaWidth = Math.max(
+    1,
+    containerWidth -
+      reservedHistoryWidth -
+      (showHistory ? historyGap : 0) -
+      leftPadding -
+      rightPadding
+  );
 
-    pegSpacingX = (gameWidth * 0.9) / maxPegsInRow;
-    pegSpacingY = (usableH * 0.92) / (rows + 1);
+  gameWidth = playAreaWidth;
+  gameHeight = containerHeight;
 
-    pegRadius = Math.min(pegSpacingX, pegSpacingY) * THEME.pegRadiusScale;
-    ballRadius = pegRadius * THEME.ballRadiusScale;
+  const maxPegsInRow = rows + 1;
 
-    historyPanelX = gridWidth + historyGap + (layout.historyOffsetX ?? 0);
-    historyPanelY = gridStartY + (layout.historyOffsetY ?? 0);
+  gridStartY =
+    gameHeight * (layout.gridStartYScale ?? 0.055) +
+    (layout.gridStartYOffset ?? 0);
 
-    lastRowY = gridStartY + rows * pegSpacingY;
-    baseWidth = rows * pegSpacingX * (layout.baseWidthScale ?? 1.2);
-    baseLeft = (gridWidth - baseWidth) / 2;
-    baseRight = baseLeft + baseWidth;
-    apexX = gridWidth / 2;
+  gridWidth = gameWidth;
 
-    mainContainer.position.set(
-      leftPadding + (layout.boardOffsetX ?? 0),
-      layout.boardOffsetY ?? 0
-    );
-  }
+  const bottomReserve = gameHeight * 0.14;
+  const usableH = gameHeight - gridStartY - bottomReserve;
+
+  pegSpacingX = (gameWidth * 0.9) / maxPegsInRow;
+  pegSpacingY = (usableH * 0.92) / (rows + 1);
+
+  pegRadius = Math.min(pegSpacingX, pegSpacingY) * THEME.pegRadiusScale;
+  ballRadius = pegRadius * THEME.ballRadiusScale;
+
+  historyPanelX =
+    gridWidth + (showHistory ? historyGap : 0) + (layout.historyOffsetX ?? 0);
+
+  historyPanelY = gridStartY + (layout.historyOffsetY ?? 0);
+
+  lastRowY = gridStartY + rows * pegSpacingY;
+
+  const baseWidthRaw = rows * pegSpacingX * (layout.baseWidthScale ?? 1.2);
+  baseWidth = Math.min(gridWidth, baseWidthRaw);
+
+  baseLeft = (gridWidth - baseWidth) / 2;
+  baseRight = baseLeft + baseWidth;
+  apexX = gridWidth / 2;
+
+  mainContainer.position.set(
+    leftPadding +
+      (layout.boardOffsetX ?? 0) +
+      (smallScreen ? (layout.mobileBoardOffsetX ?? 0) : 0),
+    (layout.boardOffsetY ?? 0) +
+      (smallScreen ? (layout.mobileBoardOffsetY ?? 0) : 0)
+  );
+}
+
+
+
 
   function triangleBoundsAtY(y) {
     const y0 = gridStartY;
@@ -1336,129 +1363,140 @@ function drawButtonBox(g, w, h, color) {
     g.drawRoundedRect(0, 0, w, h, r);
   }
 
-  function createBoxes() {
-    boxGraphics.forEach((b) => b.destroy());
-    boxTexts.forEach((t) => t.destroy());
-    boxGraphics = [];
-    boxTexts = [];
+function createBoxes() {
+  boxGraphics.forEach((b) => b.destroy());
+  boxTexts.forEach((t) => t.destroy());
+  boxGraphics = [];
+  boxTexts = [];
 
-    const gap = THEME.multiplierBox.gap;
-    const layout = THEME.layout || {};
-    const maxBoxesWidth = Math.min(
-      baseWidth * getBoxRowWidthScaleForRows(rows, layout),
-      gridWidth
-    );
+  const gap = THEME.multiplierBox.gap;
+  const layout = THEME.layout || {};
+  const smallScreen = (root.clientWidth || 500) <= 520;
 
-    // Dynamically calculate the width for the boxes based on available space
-    const wFit = (maxBoxesWidth - boxCount * gap) / boxCount;
-    const w = Math.max(
-      (160 / (boxCount-1)*2), // Ensure box width can shrink to a minimum size
-      Math.min(pegSpacingX * THEME.multiplierBox.widthScale, wFit) // Adjust multiplier box width dynamically
-    );
-    const h = Math.max(40, THEME.multiplierBox.height); // Minimum height for boxes
+  const maxBoxesWidth = Math.min(
+    baseWidth * getBoxRowWidthScaleForRows(rows, layout),
+    gridWidth
+  );
 
-    boxWidth = w;
-    boxHeight = h;
+  const wFit = (maxBoxesWidth - (boxCount - 1) * gap) / boxCount;
 
-    // Calculate the total width of all boxes (including gaps)
-    const totalW = boxCount * w + (boxCount - 1) * gap;
+  const minBoxW = Math.max(20, Math.floor(gridWidth / (boxCount + 2)));
 
-    // Create a container for the boxes
-    const boxesContainer = new Container();
+  let w = Math.min(pegSpacingX * THEME.multiplierBox.widthScale, wFit);
+  w = Math.max(minBoxW, w);
+  w = Math.min(w, wFit);
 
-    // Centering the boxes by calculating startX
-    const startX =
-      baseLeft + (baseWidth - totalW) / 2 + (layout.boxOffsetX ?? 0);
-    // Adjust the Y position for the boxes based on available space
-    const boxY =
-      Math.min(gameHeight - h - 12, lastRowY + pegSpacingY * 0.65) +
-      (layout.boxOffsetY ?? 0);
+  const h = smallScreen
+    ? Math.max(26, Math.floor((THEME.multiplierBox.height ?? 40) * 0.7))
+    : Math.max(32, THEME.multiplierBox.height);
 
-    // Create boxes for the multipliers
-    for (let i = 0; i < boxCount; i++) {
-      const multiplier = multipliers[i];
-      const color =
-        multiplier?.color ??
-        getMultiplierColor(multiplier?.value, rows, difficulty);
-      const textColor = getMultiplierTextColor(multiplier);
+  boxWidth = w;
+  boxHeight = h;
 
-      // Position each box based on calculated startX and index
-      const x = startX + i * (w + gap);
+  const totalW = boxCount * w + (boxCount - 1) * gap;
 
-      if (x < baseLeft - 1) continue; // Prevent out-of-bounds placement
-      if (x + w > baseRight + 1) continue;
+  const boxesContainer = new Container();
 
-      // Create the box (sprite-based)
-      const wrap = new Container();
+  let startX = baseLeft + (baseWidth - totalW) / 2 + (layout.boxOffsetX ?? 0);
 
-      // shadow (simple auto shadow if you don't provide a separate texture)
-      let shadow;
-      if (texBoxShadow) {
-        shadow = new Sprite(texBoxShadow);
-        if (SPRITES.useTint) shadow.tint = 0x000000;
-        shadow.alpha = THEME.multiplierBox.shadowAlpha;
-      } else {
-        shadow = new Sprite(texBox);
-        shadow.tint = 0x000000;
-        shadow.alpha = THEME.multiplierBox.shadowAlpha;
-      }
-      shadow.anchor.set(0, 0);
-      shadow.width = w;
-      shadow.height = h;
-      shadow.y = THEME.multiplierBox.pressDepth;
+   if (smallScreen) {
+  const r = rows - 1;
 
-      const face = new Sprite(texBox);
-      face.anchor.set(0, 0);
-      face.width = w;
-      face.height = h;
-      if (SPRITES.useTint) face.tint = color;
+  const minR = 8;
+  const maxR = 16;
+  const minF = 0.075;
+  const maxF = 0.08;
 
-      wrap.addChild(shadow);
-      wrap.addChild(face);
+  const t = Math.max(0, Math.min(1, (r - minR) / (maxR - minR)));
+  const factor = minF + (maxF - minF) * t;
 
-      wrap.x = x;
-      wrap.y = boxY;
-
-      // Add the box to the container
-      boxesContainer.addChild(wrap);
-      boxGraphics.push(wrap);
-      // Adjust font size for text based on box size
-      const fontSize = Math.max(
-        6,
-        Math.min(h, w) * THEME.multiplierBox.fontSizeScale
-      );
-
-      const style = new TextStyle({
-        fontFamily: THEME.multiplierBox.fontFamily,
-        fontSize,
-        fontWeight: THEME.multiplierBox.fontWeight,
-        fill: textColor,
-        stroke: 0x000000,
-        strokeThickness: Math.max(2, Math.floor(fontSize * 0.12)),
-        lineJoin: "round",
-      });
-
-      // Display the multiplier value inside the box
-      const label =
-        multiplier.value !== undefined && multiplier.value % 1 === 0
-          ? `${multiplier.value == 1000 ? "1K" : `${multiplier.value}x`}`
-          : multiplier.value !== undefined
-          ? `${multiplier.value == 1000 ? "1K" : `${multiplier.value}x`}`
-          : "N/A";
-
-      const text = new Text(label, style);
-      text.anchor.set(0.5);
-      text.x = x + w / 2;
-      text.y = boxY + h / 2 + 1;
-
-      // Add the text to the container
-      boxesContainer.addChild(text);
-      boxTexts.push(text);
+  startX = Math.max(totalW * factor, Math.min(startX, gridWidth - totalW));
+}
+   else
+    {
+      startX = Math.max(0, Math.min(startX, gridWidth - totalW));
     }
+  
 
-    // Add the boxes container to the UI container
-    uiContainer.addChild(boxesContainer);
+  const boxY =
+    Math.min(gameHeight - h - 12, lastRowY + pegSpacingY * 0.65) +
+    (layout.boxOffsetY ?? 0) +
+    (smallScreen ? (layout.mobileBoxOffsetY ?? 0) : 0);
+
+  for (let i = 0; i < boxCount; i++) {
+    const multiplier = multipliers[i];
+    const color =
+      multiplier?.color ?? getMultiplierColor(multiplier?.value, rows, difficulty);
+    const textColor = getMultiplierTextColor(multiplier);
+
+    const x = startX + i * (w + gap);
+
+    const wrap = new Container();
+
+    let shadow;
+    if (texBoxShadow) {
+      shadow = new Sprite(texBoxShadow);
+      if (SPRITES.useTint) shadow.tint = 0x000000;
+      shadow.alpha = THEME.multiplierBox.shadowAlpha;
+    } else {
+      shadow = new Sprite(texBox);
+      shadow.tint = 0x000000;
+      shadow.alpha = THEME.multiplierBox.shadowAlpha;
+    }
+    shadow.anchor.set(0, 0);
+    shadow.width = w;
+    shadow.height = h;
+    shadow.y = THEME.multiplierBox.pressDepth;
+
+    const face = new Sprite(texBox);
+    face.anchor.set(0, 0);
+    face.width = w;
+    face.height = h;
+    if (SPRITES.useTint) face.tint = color;
+
+    wrap.addChild(shadow);
+    wrap.addChild(face);
+
+    wrap.x = x;
+    wrap.y = boxY;
+
+    boxesContainer.addChild(wrap);
+    boxGraphics.push(wrap);
+
+    const fontSize = Math.max(
+      6,
+      Math.min(h, w) * (smallScreen ? THEME.multiplierBox.fontSizeScale * 0.95 : THEME.multiplierBox.fontSizeScale)
+    );
+
+    const style = new TextStyle({
+      fontFamily: THEME.multiplierBox.fontFamily,
+      fontSize,
+      fontWeight: THEME.multiplierBox.fontWeight,
+      fill: textColor,
+      stroke: 0x000000,
+      strokeThickness: Math.max(2, Math.floor(fontSize * 0.12)),
+      lineJoin: "round",
+    });
+
+    const label =
+      multiplier?.value !== undefined
+        ? multiplier.value === 1000
+          ? "1K"
+          : `${multiplier.value}x`
+        : "N/A";
+
+    const text = new Text(label, style);
+    text.anchor.set(0.5);
+    text.x = x + w / 2;
+    text.y = boxY + h / 2 + 1;
+
+    boxesContainer.addChild(text);
+    boxTexts.push(text);
   }
+
+  uiContainer.addChild(boxesContainer);
+}
+
 
   function destroyBallAndResolve(resolve, value, ballToDestroy) {
     if (!ballToDestroy) {
@@ -1531,80 +1569,92 @@ function drawButtonBox(g, w, h, color) {
     uiContainer.addChild(testModeLabel);
   }
 
-  function updateHistoryDisplay() {
-    historyTweens.forEach((cancel) => cancel());
-    historyTweens = [];
-    historyBoxes.forEach((b) => b.destroy());
-    historyBoxes = [];
+ function updateHistoryDisplay() {
+  historyTweens.forEach((cancel) => cancel());
+  historyTweens = [];
+  historyBoxes.forEach((b) => b.destroy());
+  historyBoxes = [];
 
-    const startY = historyPanelY + 20;
-    const availableHeight = Math.max(1, gameHeight - startY - 10);
-    const entryHeight = availableHeight / Math.max(1, historySize);
-    const maxBoxSize = Math.max(6, Math.min(historyPanelWidth - 10, 60));
-    const boxHeight = Math.min(entryHeight * 0.9, maxBoxSize * 0.62);
-    const boxSize = Math.max(6, Math.min(maxBoxSize, boxHeight / 0.62));
-    const gap = Math.max(2, Math.min(8, entryHeight - boxSize * 0.62));
+  const smallScreen = (root.clientWidth || 500) <= 520;
 
-    history.slice(0, historySize).forEach((multiplier, index) => {
-      if (multiplier == null) return;
-      // if (typeof multiplier !== "number") {
-      //   console.warn(`History multiplier is not a number:`, multiplier);
-      //   multiplier = 0; // Default to 0 if it's not a valid number
-      // }
+  const startY = historyPanelY + 20;
+  const availableHeight = Math.max(1, gameHeight - startY - 10);
 
-      const value = Number(multiplier?.value ?? multiplier);
-      const hasValue = Number.isFinite(value);
-      const color = multiplier?.color ?? 0xffffff; // Default to white if not found
-      const textColor = getMultiplierTextColor(value);
+  const maxItems = smallScreen ? 6 : historySize;
+  const items = history.slice(0, maxItems);
 
-      const wrap = new Container();
+  const entryHeight = availableHeight / Math.max(1, maxItems);
 
-      const box = new Graphics();
-      drawButtonBox(box, boxSize, boxSize * 0.62, color);
+  const panelPad = smallScreen ? 6 : 10;
+  const maxBoxSize = Math.max(6, Math.min(historyPanelWidth - panelPad, smallScreen ? 44 : 60));
 
-      const style = new TextStyle({
-        fontFamily: THEME.multiplierBox.fontFamily,
-        fontSize: boxSize * 0.26,
-        fontWeight: THEME.multiplierBox.fontWeight,
-        fill: textColor,
-      });
+  const boxHTarget = entryHeight * 0.9;
+  const boxHeight = Math.min(boxHTarget, maxBoxSize * 0.62);
+  const boxSize = Math.max(6, Math.min(maxBoxSize, boxHeight / 0.62));
 
-      const label = hasValue ? `${value}x` : "N/A";
+  const gap = Math.max(2, Math.min(smallScreen ? 6 : 8, entryHeight - boxSize * 0.62));
 
-      const text = new Text(label, style);
-      text.anchor.set(0.5);
-      text.x = boxSize / 2;
-      text.y = (boxSize * 0.62) / 2 + Math.max(1, boxSize * 0.02);
+  const fontScale = smallScreen ? 0.22 : 0.26;
 
-      wrap.addChild(box);
-      wrap.addChild(text);
+  items.forEach((multiplier, index) => {
+    if (multiplier == null) return;
 
-      wrap.x = historyPanelX + (historyPanelWidth - boxSize) / 2;
-      wrap.y = startY + index * (boxSize * 0.62 + gap);
+    const value = Number(multiplier?.value ?? multiplier);
+    const hasValue = Number.isFinite(value);
+    const color = multiplier?.color ?? 0xffffff;
+    const textColor = getMultiplierTextColor(value);
 
-      if (index === 0) {
-        wrap.scale.set(0);
-        wrap.alpha = 0;
-        wrap.pivot.set(boxSize / 2, (boxSize * 0.62) / 2);
-        wrap.x += boxSize / 2;
-        wrap.y += (boxSize * 0.62) / 2;
+    const wrap = new Container();
 
-        const cancel = tween(app, {
-          duration: 400,
-          update: (t) => {
-            if (wrap.destroyed) return;
-            const eased = easeOutBack(t);
-            wrap.scale.set(eased);
-            wrap.alpha = t;
-          },
-        });
-        historyTweens.push(cancel);
-      }
+    const box = new Graphics();
+    drawButtonBox(box, boxSize, boxSize * 0.62, color);
 
-      historyContainer.addChild(wrap);
-      historyBoxes.push(wrap);
+    const style = new TextStyle({
+      fontFamily: THEME.multiplierBox.fontFamily,
+      fontSize: Math.max(8, boxSize * fontScale),
+      fontWeight: THEME.multiplierBox.fontWeight,
+      fill: textColor,
     });
-  }
+
+    const label = hasValue ? `${value}x` : "N/A";
+
+    const text = new Text(label, style);
+    text.anchor.set(0.5);
+    text.x = boxSize / 2;
+    text.y = (boxSize * 0.62) / 2 + Math.max(1, boxSize * 0.02);
+
+    wrap.addChild(box);
+    wrap.addChild(text);
+
+    wrap.x = historyPanelX + (historyPanelWidth - boxSize) / 2;
+    wrap.y = startY + index * (boxSize * 0.62 + gap);
+
+    if (index === 0) {
+      wrap.scale.set(0);
+      wrap.alpha = 0;
+      wrap.pivot.set(boxSize / 2, (boxSize * 0.62) / 2);
+      wrap.x += boxSize / 2;
+      wrap.y += (boxSize * 0.62) / 2;
+
+      const cancel = tween(app, {
+        duration: 400,
+        update: (t) => {
+          if (wrap.destroyed) return;
+          const eased = easeOutBack(t);
+          wrap.scale.set(eased);
+          wrap.alpha = t;
+        },
+      });
+      historyTweens.push(cancel);
+    }
+
+    historyContainer.addChild(wrap);
+    historyBoxes.push(wrap);
+  });
+
+  historyContainer.scale.set(smallScreen ? 0.9 : 1);
+}
+
 
   function createBall() {
   const ballStyle = getBallStyle(difficulty);
@@ -2551,7 +2601,7 @@ activeBall.scale.set(base / squash, base * squash);
         }
           return multiplier;
         }
-        
+
         return -1;
       } finally {
         markDropEnd();
